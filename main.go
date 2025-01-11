@@ -44,7 +44,7 @@ const (
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
-	VERSION = "v1.0.0"
+	VERSION = "v0.1.0"
 )
 
 type ZipHeader struct {
