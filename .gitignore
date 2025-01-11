@@ -1,0 +1,32 @@
+# 二进制文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试文件
+*.test
+*.out
+
+# 密码文件
+passwd*.txt*
+
+# IDE 相关
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 依赖目录
+/vendor/
+
+# 调试文件
+debug
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
