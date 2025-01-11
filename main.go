@@ -43,6 +43,8 @@ const (
 
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
+
+	VERSION = "v1.0.0"
 )
 
 type ZipHeader struct {
@@ -629,6 +631,7 @@ func processArchive(archivePath string, passwords []string, passwordsInfo string
 }
 
 func main() {
+	fmt.Printf("7zrpw %s\n", VERSION)
 	// 检查命令行参数
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
