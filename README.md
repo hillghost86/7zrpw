@@ -60,19 +60,22 @@
 ### 命令行参数
 
 ## 直接命令行使用
-
+'''
 bash
 7zrpw.exe [选项] [文件路径]
+'''
 
 ## 安装右键菜单
-
+'''
 bash
 7zrpw.exe --install
+'''
 
 ## 卸载右键菜单
-
+'''
 bash
 7zrpw.exe --uninstall
+'''
 
 ## 注意事项
 
