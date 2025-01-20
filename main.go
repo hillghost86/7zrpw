@@ -45,7 +45,7 @@ const (
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
-	VERSION = "v0.1.1"
+	VERSION = "v0.1.2"
 )
 
 // 定义ZIP文件头结构
@@ -251,7 +251,6 @@ func testPassword(archivePath, password string) bool {
 	// 构建测试命令
 	args := []string{
 		"t",             // 测试命令
-		"-mmt=on",       // 启用多线程
 		"-p" + password, // 密码
 		archivePath,     // 文件路径
 	}
@@ -268,32 +267,32 @@ func testPassword(archivePath, password string) bool {
 		output, _ := cmd.CombinedOutput()
 		outputStr := string(output)
 
-		// 检查成功标记
 		if strings.Contains(outputStr, "Everything is Ok") {
 			resultChan <- true
 			return
 		}
-
 		// 检查错误标记
 		if strings.Contains(outputStr, "Cannot open encrypted archive") ||
 			strings.Contains(outputStr, "Headers Error") ||
 			strings.Contains(outputStr, "Can't open as archive") ||
 			strings.Contains(outputStr, "ERROR: Wrong password") ||
 			strings.Contains(outputStr, "Archives with Errors") {
-			resultChan <- false
+			resultChan <- false // 返回false
 			return
 		}
-		resultChan <- true
+		resultChan <- true // 返回true
 	}()
 
 	// 等待结果或超时
 	select {
-	case result := <-resultChan:
-		return result
+	case result := <-resultChan: // 获取结果
+		return result // 返回结果
 	case <-time.After(2 * time.Second):
 		// 2秒内没有错误标记，说明是正确密码
-		cmd.Process.Kill()
-		return true
+		// 确保检查大文件时，7z.exe会一直检查整个文件直至检查结束。
+		//当大于2秒时，基本可以认为密码正确
+		cmd.Process.Kill() // 强制终止命令
+		return true        // 返回true
 	}
 }
 
@@ -394,17 +393,19 @@ func getFirstVolumePath(archivePath string) (string, error) {
 // extractPath: 解压路径
 // 返回：错误信息
 func extractArchive(archivePath string, password string, extractPath string) error {
-	sevenZPath := getSevenZipPath()
 
-	numCPU := runtime.NumCPU()
-	if numCPU > 16 {
-		numCPU = 16
+	// 如果解压目录不存在，则创建解压目录
+	if _, err := os.Stat(extractPath); os.IsNotExist(err) { // 如果解压目录不存在
+		if err := os.MkdirAll(extractPath, 0755); err != nil { // 创建解压目录
+			return fmt.Errorf("创建解压目录失败: %v", err) //
+		}
 	}
+
+	sevenZPath := getSevenZipPath()
 
 	args := []string{
 		"x",
 		"-y",
-		fmt.Sprintf("-mmt%d", numCPU),
 		fmt.Sprintf("-p%s", password),
 		fmt.Sprintf("-o%s", extractPath),
 		archivePath,
@@ -596,16 +597,16 @@ func installContext() error {
 		registry.ALL_ACCESS,
 	)
 	if err != nil {
-		return fmt.Errorf("创建注册表项失败: %v", err)
+		return fmt.Errorf("创建注册表项失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 	defer k.Close()
 
 	// 设置显示名称和图标
 	if err := k.SetStringValue("", "使用7zrpw解压"); err != nil {
-		return fmt.Errorf("设置显示名称失败: %v", err)
+		return fmt.Errorf("设置显示名称失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 	if err := k.SetStringValue("Icon", exePath); err != nil {
-		return fmt.Errorf("设置图标失败: %v", err)
+		return fmt.Errorf("设置图标失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 
 	// 创建command子项
@@ -615,14 +616,14 @@ func installContext() error {
 		registry.ALL_ACCESS,
 	)
 	if err != nil {
-		return fmt.Errorf("创建command子项失败: %v", err)
+		return fmt.Errorf("创建command子项失败: %v\n请以【管理员身份运行】后重试。", err)
 	}
 	defer k2.Close()
 
 	// 设置命令
 	command := fmt.Sprintf("\"%s\" \"%%1\"", exePath)
 	if err := k2.SetStringValue("", command); err != nil {
-		return fmt.Errorf("设置命令失败: %v", err)
+		return fmt.Errorf("设置命令失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 
 	return nil
@@ -634,11 +635,11 @@ func uninstallContext() error {
 	// 删除注册表项
 	err := registry.DeleteKey(registry.CLASSES_ROOT, `*\shell\7zrpw\command`)
 	if err != nil {
-		return fmt.Errorf("删除command子项失败: %v", err)
+		return fmt.Errorf("删除command子项失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 	err = registry.DeleteKey(registry.CLASSES_ROOT, `*\shell\7zrpw`)
 	if err != nil {
-		return fmt.Errorf("删除注册表项失败: %v", err)
+		return fmt.Errorf("删除注册表项失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 	return nil
 }
@@ -670,6 +671,7 @@ func isPasswordRequired(fileType int) bool {
 
 // 函数说明：读取所有可能的密码文件并合并密码
 // 返回：密码列表，使用的密码文件信息，错误信息
+
 func getAllPasswords() ([]string, string, error) {
 	// 获取可能的密码文件路径
 	exePath, _ := os.Executable()
@@ -681,6 +683,20 @@ func getAllPasswords() ([]string, string, error) {
 		filepath.Join(currentDir, "passwd.txt"), // 当前目录
 		filepath.Join(exeDir, "passwd.txt"),     // 程序目录
 	}
+	// 对路径进行去重
+	var uniquePaths []string
+	seen := make(map[string]bool)
+
+	for _, path := range dictPaths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		if !seen[absPath] {
+			seen[absPath] = true
+			uniquePaths = append(uniquePaths, path)
+		}
+	}
 
 	// 用map去重
 	passwordMap := make(map[string]bool)
@@ -688,7 +704,7 @@ func getAllPasswords() ([]string, string, error) {
 	var totalCount int
 
 	// 读取所有密码文件
-	for _, path := range dictPaths {
+	for _, path := range uniquePaths {
 		if passwords, err := readPasswordFile(path); err == nil {
 			usedPaths = append(usedPaths, path)
 			for _, pass := range passwords {
@@ -819,6 +835,49 @@ func formatPath(path string) string {
 	return absPath
 }
 
+// 处理解压操作并显示结果
+func handleExtract(archivePath string, extractPath string, password string, isFound bool) {
+	if isFound {
+		if password == "" {
+			fmt.Println("\n文件无密码")
+		} else {
+			fmt.Printf("\n找到正确密码: [%s]\n", password)
+		}
+	} else {
+		fmt.Printf("\n密码正确: [%s]\n", password)
+	}
+
+	fmt.Println("正在解压文件...")
+	if err := extractArchive(archivePath, password, extractPath); err != nil {
+		fmt.Printf("解压失败: %v\n", err)
+	} else {
+		fmt.Printf("\n解压成功！\n")
+		fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
+	}
+}
+
+// 处理密码破解失败的情况
+func handleCrackFailed(archivePath string, extractPath string) {
+	fmt.Println("\n密码破解失败！")
+
+	for {
+		fmt.Print("请输入新的密码(直接回车退出): ")
+		var password string
+		fmt.Scanln(&password)
+
+		if password == "" {
+			return
+		}
+
+		if testPassword(archivePath, password) {
+			handleExtract(archivePath, extractPath, password, false)
+			return
+		} else {
+			fmt.Println("\n密码错误！请重试或回车退出")
+		}
+	}
+}
+
 //	函数说明：处理压缩文件
 //
 // 参数：
@@ -840,14 +899,14 @@ func processArchive(archivePath string, passwords []string, passwordsInfo string
 	fileType := getFileType(archivePath)
 	fmt.Printf("文件类型: %s\n", getFileTypeDesc(fileType))
 
-	// 获取并创建解压路径
+	// 获取解压路径
 	extractPath := getDefaultExtractPath(archivePath)
 
-	// 创建解压目录
-	if err := os.MkdirAll(extractPath, 0755); err != nil {
-		fmt.Printf("创建解压目录失败: %v\n", err)
-		return
-	}
+	// // 创建解压目录
+	// if err := os.MkdirAll(extractPath, 0755); err != nil {
+	// 	fmt.Printf("创建解压目录失败: %v\n", err)
+	// 	return
+	// }
 
 	// 获取第一个分卷
 	firstVolume, err := getFirstVolumePath(archivePath)
@@ -867,7 +926,7 @@ func processArchive(archivePath string, passwords []string, passwordsInfo string
 		if err := extractArchive(archivePath, "", extractPath); err != nil {
 			fmt.Printf("解压失败: %v\n", err)
 		} else {
-			//fmt.Printf("\n解压成功！\n")
+			fmt.Printf("\n解压成功！\n")
 			fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
 		}
 		return
@@ -881,42 +940,51 @@ func processArchive(archivePath string, passwords []string, passwordsInfo string
 
 	// 尝试使用找到的密码解压
 	if foundPassword, err := crackArchive(archivePath, passwords); err == nil {
-		if foundPassword == "" {
-			fmt.Println("\n文件无密码")
-		} else {
-			fmt.Printf("\n找到正确密码: [%s]\n", foundPassword)
-		}
-		fmt.Println("正在解压文件...")
-		if err := extractArchive(archivePath, foundPassword, extractPath); err != nil {
-			fmt.Printf("解压失败: %v\n", err)
-		} else {
-			//fmt.Printf("\n解压成功！\n")
-			fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
-		}
+		handleExtract(archivePath, extractPath, foundPassword, true)
+	} else {
+		handleCrackFailed(archivePath, extractPath)
 	}
 }
 
 // 主函数
 func main() {
+	clearScreen()
 
-	fmt.Printf("7zrpw %s\n", VERSION)
 	// 检查命令行参数
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--install":
 			if err := installContext(); err != nil {
-				fmt.Printf("安装右键菜单失败: %v\n", err)
+				fmt.Println("----------------------------------")
+				fmt.Println("  xxxxxx 安装失败 xxxxxx")
+				fmt.Println("(╯°□°）╯︵ ┻━┻")
+				fmt.Printf("%v\n", err)
+				fmt.Println("右键菜单安装失败！")
+				fmt.Println("----------------------------------")
 			} else {
+				fmt.Println("----------------------------------")
+				fmt.Println("  ✓✓✓✓✓ 安装成功 ✓✓✓✓✓")
+				fmt.Println("	( •̀ ω •́ )✧")
 				fmt.Println("右键菜单安装成功！")
+				fmt.Println("----------------------------------")
 			}
 			fmt.Print("\n按回车键退出...")
 			fmt.Scanln()
 			return
 		case "--uninstall":
 			if err := uninstallContext(); err != nil {
-				fmt.Printf("卸载右键菜单失败: %v\n", err)
+				fmt.Println("----------------------------------")
+				fmt.Println("  xxxxxx 卸载失败 xxxxxx")
+				fmt.Println("(╯°□°）╯︵ ┻━┻")
+				fmt.Printf("%v\n", err)
+				fmt.Println("右键菜单卸载失败！")
+				fmt.Println("----------------------------------")
 			} else {
+				fmt.Println("----------------------------------")
+				fmt.Println("  ✓✓✓✓✓ 卸载成功 ✓✓✓✓✓")
+				fmt.Println("	( •̀ ω •́ )✧")
 				fmt.Println("右键菜单卸载成功！")
+				fmt.Println("----------------------------------")
 			}
 			fmt.Print("\n按回车键退出...")
 			fmt.Scanln()
@@ -925,14 +993,14 @@ func main() {
 			// 如果参数是文件路径，直接处理该文件
 			filePath := os.Args[1]
 			if _, err := os.Stat(filePath); err == nil {
-				// 切换到文件所在目录
-				dir := filepath.Dir(filePath)
-				os.Chdir(dir)
+				// 获取文件的绝对路径
+				absPath, err := filepath.Abs(filePath)
+				if err != nil {
+					fmt.Printf("无法获取文件的绝对路径: %v\n", err)
+					return
+				}
 
-				// 获取文件名
-				fileName := filepath.Base(filePath)
-
-				// 在处理文件之前获取密码
+				// 获取密码（从当前目录和程序所在目录查找）
 				passwords, passwordsInfo, err := getAllPasswords()
 				if err != nil {
 					fmt.Printf("\n提示：%v\n", err)
@@ -942,8 +1010,8 @@ func main() {
 				}
 
 				// 处理文件
-				if getFileType(fileName) != -1 {
-					processArchive(fileName, passwords, passwordsInfo)
+				if getFileType(absPath) != -1 {
+					processArchive(absPath, passwords, passwordsInfo)
 				} else {
 					fmt.Println("不支持的文件格式")
 				}
@@ -973,8 +1041,11 @@ func main() {
 			fmt.Println("\n0: 退出程序")
 			fmt.Println("a: 解压所有压缩文件")
 			fmt.Println("b: 返回上级目录")
+			fmt.Println("i: 安装右键菜单")
+			fmt.Println("u: 卸载右键菜单")
+			fmt.Println("h: 帮助信息")
 
-			fmt.Print("\n请选择 (输入序号或路径): ")
+			fmt.Print("\n请选择 (输入序号或粘贴路径): ")
 			var choice string
 			fmt.Scanln(&choice)
 
@@ -986,9 +1057,11 @@ func main() {
 				parent := filepath.Dir(currentDir)
 				if parent != currentDir {
 					currentDir = parent
+					clearScreen()
 				}
 				continue
 			} else if choice == "a" || choice == "A" {
+				clearScreen()
 				// 处理所有压缩文件
 				fmt.Println("\n开始处理所有压缩文件...")
 
@@ -1026,6 +1099,67 @@ func main() {
 				fmt.Print("\n按回车键继续...")
 				fmt.Scanln()
 				continue
+			} else if choice == "h" || choice == "H" { //帮助信息
+				clearScreen()
+				fmt.Println("\n帮助信息:")
+				fmt.Println("----------------------------------")
+				fmt.Println("设置密码文本")
+				fmt.Println("在7zrpw.exe所在目录新建passwd.txt文件，将解压密码写入文件，每行一个密码，密码文件名必须为passwd.txt")
+				fmt.Println("----------------------------------")
+				fmt.Println("使用方法")
+				fmt.Println("1、(推荐)安装右键菜单,通过右键菜单解压文件.")
+				fmt.Println("2、命令行模式: 7zrpw 文件路径,例如: 7zrpw .\\test.zip 或 7zrpw d:\\test\\test.zip")
+				fmt.Println("3、交互模式: 直接双击运行 7zrpw.exe")
+				fmt.Printf("-----------------------------------\n")
+				fmt.Print("右键菜单安装/卸载方法一：\n")
+				fmt.Print("1、右键7zrpw.exe，选择以【管理员身份运行】\n")
+				fmt.Print("2、安装：在交互模式下，输入i，回车，即可安装右键菜单\n")
+				fmt.Print("3、卸载：在交互模式下，输入u，回车，即可卸载右键菜单\n")
+				fmt.Print("右键菜单安装方法二：\n")
+				fmt.Print("1、以管理员权限启动cmd\n")
+				fmt.Print("2、安装：在cmd命令行窗口运行 7zrpw.exe --install\n")
+				fmt.Print("3、卸载：在cmd命令行窗口运行 7zrpw.exe --uninstall\n")
+				fmt.Scanln()
+				continue
+			} else if choice == "i" || choice == "I" {
+				clearScreen()
+				// 安装右键菜单
+				installContext()
+				//检测是否安装成功
+				if err := installContext(); err != nil {
+					//打印一个哭脸
+					fmt.Println("----------------------------------")
+					fmt.Println("  xxxxxx 安装失败 xxxxxx")
+					fmt.Println("(╯°□°）╯︵ ┻━┻")
+					fmt.Printf("%v\n", err)
+					fmt.Println("右键菜单安装失败！")
+					fmt.Println("----------------------------------")
+				} else {
+					fmt.Println("----------------------------------")
+					fmt.Println("  ✓✓✓✓✓ 安装成功 ✓✓✓✓✓")
+					fmt.Println("	( •̀ ω •́ )✧")
+					fmt.Println("右键菜单安装成功！")
+					fmt.Println("----------------------------------")
+				}
+				continue
+			} else if choice == "u" || choice == "U" {
+				clearScreen()
+				// 卸载右键菜单
+				if err := uninstallContext(); err != nil {
+					fmt.Println("----------------------------------")
+					fmt.Println("  xxxxxx 卸载失败 xxxxxx")
+					fmt.Println("(╯°□°）╯︵ ┻━┻")
+					fmt.Printf("%v\n", err)
+					fmt.Println("右键菜单卸载失败！")
+					fmt.Println("----------------------------------")
+				} else {
+					fmt.Println("----------------------------------")
+					fmt.Println("  ✓✓✓✓✓ 卸载成功 ✓✓✓✓✓")
+					fmt.Println("	( •̀ ω •́ )✧")
+					fmt.Println("右键菜单卸载成功！")
+					fmt.Println("----------------------------------")
+				}
+				continue
 			}
 
 			// 尝试解析数字选择
@@ -1034,8 +1168,9 @@ func main() {
 				fullPath := filepath.Join(currentDir, strings.TrimSuffix(selected, "/"))
 
 				if strings.HasSuffix(selected, "/") {
-					// 如果选择的是目录，进入该目录
+					// 如果选择的是目录，进入该目录，并且清除屏幕
 					currentDir = fullPath
+					clearScreen()
 					continue
 				} else {
 					// 如果选择的是文件，处理该文件
@@ -1048,10 +1183,12 @@ func main() {
 					if fileInfo.IsDir() {
 						// 如果是目录，进入该目录
 						currentDir = choice
+						clearScreen()
 						continue
 					} else {
 						// 如果是文件，处理该文件
 						archivePath = choice
+						clearScreen()
 					}
 				} else {
 					fmt.Printf("无效的路径: %s\n", choice)
@@ -1062,6 +1199,7 @@ func main() {
 			fmt.Println("\n当前目录为空")
 			fmt.Println("0: 退出程序")
 			fmt.Println("b: 返回上级目录")
+			fmt.Println("h: 帮助信息")
 			fmt.Print("\n请选择或输入路径: ")
 			var choice string
 			fmt.Scanln(&choice)
@@ -1135,4 +1273,21 @@ func main() {
 		fmt.Print("\n按回车键继续...")
 		fmt.Scanln()
 	}
+}
+
+// clearScreen 清除屏幕内容
+func clearScreen() {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		cmd.Run()
+	default: // linux, darwin, etc
+		fmt.Print("\033[H\033[2J") // ANSI 转义序列清屏
+	}
+	fmt.Printf("---------------------------------------------------------------------\n")
+	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
+	fmt.Printf("BY:hillghost86 \n")
+	fmt.Printf("github:https://github.com/hillghost86/7zrpw\n")
+	fmt.Printf("---------------------------------------------------------------------\n")
 }

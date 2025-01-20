@@ -23,6 +23,7 @@ passwd*.txt*
 
 # 调试文件
 debug
+/test/
 
 # Windows
 Thumbs.db
@@ -30,3 +31,9 @@ Desktop.ini
 
 # macOS
 .DS_Store
+
+# 其他
+/tools/
+
+#帮助文件
+/help/
