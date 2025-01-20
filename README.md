@@ -62,7 +62,7 @@
 ## 直接命令行使用
 
 ```bash
-7zrpw.exe [选项] [文件路径]
+7zrpw.exe [文件路径]
 ```
 
 
@@ -88,7 +88,7 @@
 - 建议使用完整版密码字典以提高破解成功率
 - 密码破解结果仅供参考，请自行判断是否正确
 ## 技术支持
-[GitHub Issues](https://github.com/hillghsot86/7zrpw/issues)
+[GitHub Issues](https://github.com/hillghost86/7zrpw/issues)
 
 ## 许可证
 
