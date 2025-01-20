@@ -44,7 +44,9 @@
 
 ![7zrpw](https://github.com/hillghost86/7zrpw/blob/master/help/1.jpg)
 2. 或者将文件拖放到程序图标上
+
 3. 或者通过右键菜单选择文件
+
 ![7zrpw](https://github.com/hillghost86/7zrpw/blob/master/help/3.jpg)
 
 ### 密码字典
