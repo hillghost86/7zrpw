@@ -41,8 +41,10 @@
 ### 基本使用
 
 1. 直接运行程序，按提示选择要处理的文件
+![7zrpw](https://github.com/hillghost86/7zrpw/blob/main/help/1.jpg)
 2. 或者将文件拖放到程序图标上
 3. 或者通过右键菜单选择文件
+![7zrpw](https://github.com/hillghost86/7zrpw/blob/main/help/3.jpg)
 
 ### 密码字典
 
