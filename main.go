@@ -45,7 +45,7 @@ const (
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
-	VERSION = "v0.1.2"
+	VERSION = "v0.1.3"
 )
 
 // 定义ZIP文件头结构
@@ -310,6 +310,11 @@ func formatProgress(current, total int, currentPass string) string {
 		current, total, percent, currentPass)
 }
 
+// 函数说明：破解压缩文件
+// 参数：
+// archivePath: 压缩文件路径
+// passwords: 密码列表
+// 返回：密码，错误信息
 func crackArchive(archivePath string, passwords []string) (string, error) {
 	// 首先尝试空密码
 	if testPassword(archivePath, "") {
@@ -586,6 +591,12 @@ func installContext() error {
 	// 获取程序路径
 	exe, err := os.Executable()
 	if err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 安装失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("获取程序路径失败: %v\n", err)
+		fmt.Println("右键菜单安装失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("获取程序路径失败: %v", err)
 	}
 	exePath := strings.ReplaceAll(exe, "/", "\\")
@@ -597,15 +608,33 @@ func installContext() error {
 		registry.ALL_ACCESS,
 	)
 	if err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 安装失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("创建注册表项失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单安装失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("创建注册表项失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 	defer k.Close()
 
 	// 设置显示名称和图标
 	if err := k.SetStringValue("", "使用7zrpw解压"); err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 安装失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("设置显示名称失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单安装失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("设置显示名称失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 	if err := k.SetStringValue("Icon", exePath); err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 安装失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("设置图标失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单安装失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("设置图标失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 
@@ -616,6 +645,12 @@ func installContext() error {
 		registry.ALL_ACCESS,
 	)
 	if err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 安装失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("创建command子项失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单安装失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("创建command子项失败: %v\n请以【管理员身份运行】后重试。", err)
 	}
 	defer k2.Close()
@@ -623,9 +658,21 @@ func installContext() error {
 	// 设置命令
 	command := fmt.Sprintf("\"%s\" \"%%1\"", exePath)
 	if err := k2.SetStringValue("", command); err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 安装失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("设置命令失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单安装失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("设置命令失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
 
+	// 安装成功
+	fmt.Println("----------------------------------")
+	fmt.Println("  ✓✓✓✓✓ 安装成功 ✓✓✓✓✓")
+	fmt.Println("	( •̀ ω •́ )✧")
+	fmt.Println("右键菜单安装成功！")
+	fmt.Println("----------------------------------")
 	return nil
 }
 
@@ -635,12 +682,32 @@ func uninstallContext() error {
 	// 删除注册表项
 	err := registry.DeleteKey(registry.CLASSES_ROOT, `*\shell\7zrpw\command`)
 	if err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 卸载失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("删除command子项失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单卸载失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("删除command子项失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
+
 	err = registry.DeleteKey(registry.CLASSES_ROOT, `*\shell\7zrpw`)
 	if err != nil {
+		fmt.Println("----------------------------------")
+		fmt.Println("  xxxxxx 卸载失败 xxxxxx")
+		fmt.Println("(╯°□°）╯︵ ┻━┻")
+		fmt.Printf("删除注册表项失败: %v\n请以【管理员身份运行】后重试。\n", err)
+		fmt.Println("右键菜单卸载失败！")
+		fmt.Println("----------------------------------")
 		return fmt.Errorf("删除注册表项失败: %v \n请以【管理员身份运行】后重试。", err)
 	}
+
+	// 卸载成功
+	fmt.Println("----------------------------------")
+	fmt.Println("  ✓✓✓✓✓ 卸载成功 ✓✓✓✓✓")
+	fmt.Println("	( •̀ ω •́ )✧")
+	fmt.Println("右键菜单卸载成功！")
+	fmt.Println("----------------------------------")
 	return nil
 }
 
@@ -835,7 +902,61 @@ func formatPath(path string) string {
 	return absPath
 }
 
-// 处理解压操作并显示结果
+// 添加新函数：保存密码到passwd.txt文件
+// 参数：
+// password: 密码
+// 返回：错误信息
+func savePasswordToFile(password string) error {
+	// 获取程序路径
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("获取程序路径失败: %v", err)
+	}
+
+	// 构建密码文件路径
+	passwdPath := filepath.Join(filepath.Dir(exePath), "passwd.txt")
+	//不存在passwd.txt则创建
+	if _, err := os.Stat(passwdPath); os.IsNotExist(err) {
+		os.Create(passwdPath)
+	}
+
+	// 读取现有密码，避免重复
+	existingPasswords := make(map[string]bool)
+	if content, err := os.ReadFile(passwdPath); err == nil {
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				existingPasswords[line] = true
+			}
+		}
+	}
+
+	// 如果密码已存在，直接返回
+	if existingPasswords[password] {
+		return nil
+	}
+
+	// 追加新密码到文件
+	f, err := os.OpenFile(passwdPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("打开密码文件失败: %v", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(password + "\n"); err != nil {
+		return fmt.Errorf("写入密码失败: %v", err)
+	}
+
+	return nil
+}
+
+// 修改 handleExtract 函数
+// 参数：
+// archivePath: 压缩文件路径
+// extractPath: 解压路径
+// password: 密码
+// isFound: 是否找到密码
 func handleExtract(archivePath string, extractPath string, password string, isFound bool) {
 	if isFound {
 		if password == "" {
@@ -871,6 +992,12 @@ func handleCrackFailed(archivePath string, extractPath string) {
 
 		if testPassword(archivePath, password) {
 			handleExtract(archivePath, extractPath, password, false)
+			//保存密码到passwd.txt文件
+			if err := savePasswordToFile(password); err != nil {
+				fmt.Printf("保存密码失败: %v\n", err)
+			} else {
+				fmt.Printf("密码【%s】已保存到passwd.txt文件: \n", password)
+			}
 			return
 		} else {
 			fmt.Println("\n密码错误！请重试或回车退出")
@@ -946,45 +1073,56 @@ func processArchive(archivePath string, passwords []string, passwordsInfo string
 	}
 }
 
+// clearScreen 清除屏幕内容
+func clearScreen() {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		cmd.Run()
+	default: // linux, darwin, etc
+		fmt.Print("\033[H\033[2J") // ANSI 转义序列清屏
+	}
+	fmt.Printf("---------------------------------------------------------------------\n")
+	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
+	fmt.Printf("BY:hillghost86 \n")
+	fmt.Printf("github:https://github.com/hillghost86/7zrpw\n")
+	fmt.Printf("---------------------------------------------------------------------\n")
+}
+
 // 主函数
 func main() {
 	clearScreen()
+	//查询7zrpw.exe所在目录是否有passwd.txt文件，如果没有则创建
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("获取程序路径失败: %v\n", err)
+		return
+	}
+	passwdPath := filepath.Join(filepath.Dir(exePath), "passwd.txt")
+	if _, err := os.Stat(passwdPath); os.IsNotExist(err) {
+		os.Create(passwdPath)
+	}
 
 	// 检查命令行参数
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--install":
+			// 安装右键菜单
 			if err := installContext(); err != nil {
-				fmt.Println("----------------------------------")
-				fmt.Println("  xxxxxx 安装失败 xxxxxx")
-				fmt.Println("(╯°□°）╯︵ ┻━┻")
-				fmt.Printf("%v\n", err)
-				fmt.Println("右键菜单安装失败！")
-				fmt.Println("----------------------------------")
-			} else {
-				fmt.Println("----------------------------------")
-				fmt.Println("  ✓✓✓✓✓ 安装成功 ✓✓✓✓✓")
-				fmt.Println("	( •̀ ω •́ )✧")
-				fmt.Println("右键菜单安装成功！")
-				fmt.Println("----------------------------------")
+				fmt.Print("\n按回车键退出...")
+				fmt.Scanln()
+				return
 			}
 			fmt.Print("\n按回车键退出...")
 			fmt.Scanln()
 			return
 		case "--uninstall":
+			// 卸载右键菜单
 			if err := uninstallContext(); err != nil {
-				fmt.Println("----------------------------------")
-				fmt.Println("  xxxxxx 卸载失败 xxxxxx")
-				fmt.Println("(╯°□°）╯︵ ┻━┻")
-				fmt.Printf("%v\n", err)
-				fmt.Println("右键菜单卸载失败！")
-				fmt.Println("----------------------------------")
-			} else {
-				fmt.Println("----------------------------------")
-				fmt.Println("  ✓✓✓✓✓ 卸载成功 ✓✓✓✓✓")
-				fmt.Println("	( •̀ ω •́ )✧")
-				fmt.Println("右键菜单卸载成功！")
-				fmt.Println("----------------------------------")
+				fmt.Print("\n按回车键退出...")
+				fmt.Scanln()
+				return
 			}
 			fmt.Print("\n按回车键退出...")
 			fmt.Scanln()
@@ -1022,7 +1160,7 @@ func main() {
 		}
 	}
 
-	// 原有的交互式处理逻辑
+	// 交互模式
 	currentDir := "."
 	for {
 		var archivePath string
@@ -1038,18 +1176,19 @@ func main() {
 				fmt.Printf("%d: %s\n", i+1, file)
 			}
 			// 然后显示其他选项
-			fmt.Println("\n0: 退出程序")
+
 			fmt.Println("a: 解压所有压缩文件")
 			fmt.Println("b: 返回上级目录")
 			fmt.Println("i: 安装右键菜单")
 			fmt.Println("u: 卸载右键菜单")
 			fmt.Println("h: 帮助信息")
+			fmt.Println("q: 退出程序")
 
 			fmt.Print("\n请选择 (输入序号或粘贴路径): ")
 			var choice string
 			fmt.Scanln(&choice)
 
-			if choice == "0" {
+			if choice == "0" || choice == "q" || choice == "Q" {
 				fmt.Println("程序已退出")
 				return
 			} else if choice == "b" || choice == "B" {
@@ -1125,40 +1264,11 @@ func main() {
 				clearScreen()
 				// 安装右键菜单
 				installContext()
-				//检测是否安装成功
-				if err := installContext(); err != nil {
-					//打印一个哭脸
-					fmt.Println("----------------------------------")
-					fmt.Println("  xxxxxx 安装失败 xxxxxx")
-					fmt.Println("(╯°□°）╯︵ ┻━┻")
-					fmt.Printf("%v\n", err)
-					fmt.Println("右键菜单安装失败！")
-					fmt.Println("----------------------------------")
-				} else {
-					fmt.Println("----------------------------------")
-					fmt.Println("  ✓✓✓✓✓ 安装成功 ✓✓✓✓✓")
-					fmt.Println("	( •̀ ω •́ )✧")
-					fmt.Println("右键菜单安装成功！")
-					fmt.Println("----------------------------------")
-				}
 				continue
 			} else if choice == "u" || choice == "U" {
 				clearScreen()
 				// 卸载右键菜单
-				if err := uninstallContext(); err != nil {
-					fmt.Println("----------------------------------")
-					fmt.Println("  xxxxxx 卸载失败 xxxxxx")
-					fmt.Println("(╯°□°）╯︵ ┻━┻")
-					fmt.Printf("%v\n", err)
-					fmt.Println("右键菜单卸载失败！")
-					fmt.Println("----------------------------------")
-				} else {
-					fmt.Println("----------------------------------")
-					fmt.Println("  ✓✓✓✓✓ 卸载成功 ✓✓✓✓✓")
-					fmt.Println("	( •̀ ω •́ )✧")
-					fmt.Println("右键菜单卸载成功！")
-					fmt.Println("----------------------------------")
-				}
+				uninstallContext()
 				continue
 			}
 
@@ -1191,6 +1301,7 @@ func main() {
 						clearScreen()
 					}
 				} else {
+					clearScreen()
 					fmt.Printf("无效的路径: %s\n", choice)
 					continue
 				}
@@ -1273,21 +1384,4 @@ func main() {
 		fmt.Print("\n按回车键继续...")
 		fmt.Scanln()
 	}
-}
-
-// clearScreen 清除屏幕内容
-func clearScreen() {
-	switch runtime.GOOS {
-	case "windows":
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-	default: // linux, darwin, etc
-		fmt.Print("\033[H\033[2J") // ANSI 转义序列清屏
-	}
-	fmt.Printf("---------------------------------------------------------------------\n")
-	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
-	fmt.Printf("BY:hillghost86 \n")
-	fmt.Printf("github:https://github.com/hillghost86/7zrpw\n")
-	fmt.Printf("---------------------------------------------------------------------\n")
 }

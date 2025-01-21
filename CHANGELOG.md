@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.3] - 2025-01-21
+
+### 新增
+- 新增密码自动保存到passwd.txt文件中的功能
+
+### 优化
+- 当没有passwd.txt时，自动创建
+
 ## [v0.1.2] - 2025-01-15
 
 ### 新增
