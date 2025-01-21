@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	_ "embed"
 	"fmt"
 	"io"
@@ -242,6 +243,31 @@ func getFileType(path string) int {
 	return -1
 }
 
+// 函数说明：判断是否需要密码
+// 参数：
+// fileType: 文件类型
+// 返回：是否需要密码
+func isPasswordRequired(fileType int) bool {
+	switch fileType {
+	case TYPE_ZIP, TYPE_ZIP_PART,
+		TYPE_RAR, TYPE_RAR_PART,
+		TYPE_7Z,
+		TYPE_ARJ,
+		TYPE_LZH:
+		return true
+	case TYPE_TAR, TYPE_TAR_PART,
+		TYPE_GZ,
+		TYPE_BZ2,
+		TYPE_XZ,
+		TYPE_ISO,
+		TYPE_WIM,
+		TYPE_CAB:
+		return false
+	default:
+		return true // 未知格式默认需要密码
+	}
+}
+
 // 函数说明：测试密码
 // 参数：
 // archivePath: 压缩文件路径
@@ -304,10 +330,17 @@ func testPassword(archivePath, password string) bool {
 // 返回：格式化后的进度显示字符串
 func formatProgress(current, total int, currentPass string) string {
 	percent := float64(current) * 100.0 / float64(total)
+
+	// 使用已有的 decodeGBK 函数处理密码字符串
+	cleanPass := decodeGBK(currentPass)
+
 	// 先清除整行，再显示新内容
-	return fmt.Sprintf("\r%s\r正在尝试密码... %d/%d (%.1f%%) [%s]",
+	return fmt.Sprintf("\r%s\r正在尝试密码... %d/%d （%.1f%%） [%s]",
 		strings.Repeat(" ", 100), // 清除整行
-		current, total, percent, currentPass)
+		current,
+		total,
+		percent,
+		cleanPass)
 }
 
 // 函数说明：破解压缩文件
@@ -336,7 +369,10 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 	return "", fmt.Errorf("未找到正确密码")
 }
 
-// 获取第一个分卷的路径
+// 函数说明：获取第一个分卷的路径
+// 参数：
+// archivePath: 压缩文件路径
+// 返回：第一个分卷的路径，错误信息
 func getFirstVolumePath(archivePath string) (string, error) {
 	baseName := filepath.Base(archivePath)
 	baseDir := filepath.Dir(archivePath)
@@ -391,7 +427,7 @@ func getFirstVolumePath(archivePath string) (string, error) {
 	return archivePath, nil
 }
 
-// 解压函数
+// 函数说明：解压函数
 // 参数：
 // archivePath: 压缩文件路径
 // password: 密码
@@ -452,7 +488,10 @@ func extractArchive(archivePath string, password string, extractPath string) err
 	return nil
 }
 
-// 格式化持续时间
+// 函数说明：格式化持续时间
+// 参数：
+// d: 持续时间
+// 返回：格式化后的持续时间字符串
 func formatDuration(d time.Duration) string {
 	h := d / time.Hour
 	d -= h * time.Hour
@@ -556,33 +595,377 @@ func findCompressFiles(dir string) []string {
 // 参数：
 // path: 密码文件路径
 // 返回：密码列表，错误信息
-func readPasswordFile(path string) ([]string, error) {
-	// 读取文件内容
-	content, err := os.ReadFile(path)
+func readPasswordFile(path string) (<-chan string, error) {
+	passwordChan := make(chan string)
+	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取密码文件失败: %v", err)
+		return nil, err
 	}
 
-	// 检测并处理文件编码
-	decodedContent := decodeGBK(string(content))
+	go func() {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			passwordChan <- strings.TrimSpace(scanner.Text())
+		}
+		close(passwordChan)
+	}()
 
-	// 分割为行
-	lines := strings.Split(decodedContent, "\n")
-	var passwords []string
+	return passwordChan, nil
+}
 
-	// 处理每一行
-	for _, line := range lines {
-		// 移除 BOM 标记
-		line = strings.TrimPrefix(line, "\ufeff")
-		// 移除 Windows 的回车符和空白字符
-		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
+// 函数说明：读取所有可能的密码文件并合并密码
+// 返回：密码列表，使用的密码文件信息，错误信息
 
-		if line != "" {
-			passwords = append(passwords, line)
+func getAllPasswords() ([]string, string, error) {
+	// 获取可能的密码文件路径
+	exePath, _ := os.Executable()
+	exeDir := filepath.Dir(exePath)
+	currentDir, _ := os.Getwd()
+
+	// 按优先级顺序存储密码文件路径
+	dictPaths := []string{
+		filepath.Join(currentDir, "passwd.txt"), // 当前目录
+		filepath.Join(exeDir, "passwd.txt"),     // 程序目录
+	}
+	// 对路径进行去重
+	var uniquePaths []string
+	seen := make(map[string]bool)
+
+	for _, path := range dictPaths {
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		if !seen[absPath] {
+			seen[absPath] = true
+			uniquePaths = append(uniquePaths, path)
 		}
 	}
 
-	return passwords, nil
+	// 用map去重
+	passwordMap := make(map[string]bool)
+	var usedPaths []string
+	var totalCount int
+
+	// 读取所有密码文件
+	for _, path := range uniquePaths {
+		if passwordChan, err := readPasswordFile(path); err == nil {
+			usedPaths = append(usedPaths, path)
+			// 从 channel 中读取密码
+			for password := range passwordChan {
+				if !passwordMap[password] {
+					passwordMap[password] = true
+					totalCount++
+				}
+			}
+		}
+	}
+
+	// 如果没有找到任何密码文件
+	if len(passwordMap) == 0 {
+		return nil, "", fmt.Errorf("未找到密码文件")
+	}
+
+	// 转换map为切片
+	var uniquePasswords []string
+	for pass := range passwordMap {
+		uniquePasswords = append(uniquePasswords, pass)
+	}
+
+	// 生成使用的密码文件信息
+	var usedPathsInfo string
+	if len(usedPaths) > 0 {
+		usedPathsInfo = "使用的密码文件:\n"
+		for i, path := range usedPaths {
+			passwords, err := readPasswordFile(path)
+			if err != nil {
+				usedPathsInfo += fmt.Sprintf("%d. %s (读取失败: %v)\n", i+1, path, err)
+			} else {
+				usedPathsInfo += fmt.Sprintf("%d. %s (包含 %d 个密码)\n", i+1, path, len(passwords))
+			}
+		}
+		usedPathsInfo += fmt.Sprintf("\n去重后共 %d 个密码", len(uniquePasswords))
+	}
+
+	return uniquePasswords, usedPathsInfo, nil
+}
+
+// 函数说明：获取文件类型描述
+// 参数：
+// fileType: 文件类型
+// 返回：文件类型描述
+func getFileTypeDesc(fileType int) string {
+	switch fileType {
+	case TYPE_ZIP:
+		return "ZIP 压缩文件"
+	case TYPE_RAR:
+		return "RAR 压缩文件"
+	case TYPE_7Z:
+		return "7Z 压缩文件"
+	case TYPE_ZIP_PART:
+		return "ZIP 分卷压缩文件"
+	case TYPE_RAR_PART:
+		return "RAR 分卷压缩文件"
+	case TYPE_7Z_PART:
+		return "7Z 分卷压缩文件"
+	case TYPE_GZ:
+		return "GZIP 压缩文件"
+	case TYPE_BZ2:
+		return "BZIP2 压缩文件"
+	case TYPE_TAR:
+		return "TAR 归档文件"
+	case TYPE_TAR_PART:
+		return "TAR 分卷归档文件"
+	case TYPE_XZ:
+		return "XZ 压缩文件"
+	case TYPE_CAB:
+		return "CAB 压缩文件"
+	case TYPE_ISO:
+		return "ISO 镜像文件"
+	case TYPE_ARJ:
+		return "ARJ 压缩文件"
+	case TYPE_LZH:
+		return "LZH 压缩文件"
+	case TYPE_WIM:
+		return "WIM 映像文件"
+	default:
+		return "未知文件类型"
+	}
+}
+
+// 函数说明：格式化文件大小
+// 参数：
+// size: 文件大小
+// 返回：文件大小描述
+func formatFileSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
+// 函数说明：获取默认解压路径（去掉扩展名和_files后缀）
+// 参数：
+// archivePath: 压缩文件路径
+// 返回：解压路径
+func getDefaultExtractPath(archivePath string) string {
+	// 获取文件名（不含扩展名）
+	baseName := filepath.Base(archivePath)
+	ext := filepath.Ext(baseName)
+	nameWithoutExt := strings.TrimSuffix(baseName, ext)
+
+	// 如果是分卷文件，去除压缩文件扩展名
+	switch {
+	case strings.HasSuffix(nameWithoutExt, ".7z"):
+		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".7z")
+	case strings.HasSuffix(nameWithoutExt, ".zip"):
+		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".zip")
+	case strings.HasSuffix(nameWithoutExt, ".rar"):
+		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".rar")
+	}
+
+	// 返回解压目录名（不加_files后缀）
+	return filepath.Join(filepath.Dir(archivePath), nameWithoutExt)
+}
+
+// 函数说明：格式化路径显示
+// 参数：
+// path: 路径
+// 返回：格式化后的路径
+func formatPath(path string) string {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Sprintf("%s (无法获取完整路径)", path)
+	}
+	return absPath
+}
+
+// 函数说明：保存密码到passwd.txt文件
+// 参数：
+// password: 密码
+// 返回：错误信息
+func savePasswordToFile(password string) error {
+	// 获取程序路径
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("获取程序路径失败: %v", err)
+	}
+
+	// 构建密码文件路径
+	passwdPath := filepath.Join(filepath.Dir(exePath), "passwd.txt")
+
+	// 检查密码是否已存在
+	content, err := os.ReadFile(passwdPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("读取密码文件失败: %v", err)
+	}
+
+	// 检查密码是否已存在
+	if strings.Contains(string(content), password) {
+		return nil
+	}
+
+	// 以追加模式打开文件
+	f, err := os.OpenFile(passwdPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("打开密码文件失败: %v", err)
+	}
+	defer f.Close()
+
+	// 如果文件不为空且最后一个字符不是换行符，先写入换行符
+	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
+		if _, err := f.WriteString("\n"); err != nil {
+			return fmt.Errorf("写入换行符失败: %v", err)
+		}
+	}
+
+	// 只追加新密码
+	if _, err := f.WriteString(password + "\n"); err != nil {
+		return fmt.Errorf("写入密码失败: %v", err)
+	}
+
+	return nil
+}
+
+// 函数说明：处理解压文件
+// 参数：
+// archivePath: 压缩文件路径
+// extractPath: 解压路径
+// password: 密码
+// isFound: 是否找到密码
+func handleExtract(archivePath string, extractPath string, password string, isFound bool) {
+	if isFound {
+		if password == "" {
+			fmt.Println("\n文件无密码")
+		} else {
+			fmt.Printf("\n找到正确密码: [%s]\n", password)
+		}
+	} else {
+		fmt.Printf("\n密码正确: [%s]\n", password)
+	}
+
+	fmt.Println("正在解压文件...")
+	if err := extractArchive(archivePath, password, extractPath); err != nil {
+		fmt.Printf("解压失败: %v\n", err)
+	} else {
+		fmt.Printf("\n解压成功！\n")
+		fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
+	}
+}
+
+// 处理密码破解失败的情况
+
+func handleCrackFailed(archivePath string, extractPath string) {
+	fmt.Println("\n密码破解失败！")
+
+	for {
+		fmt.Print("请输入新的密码(直接回车退出): ")
+		var password string
+		fmt.Scanln(&password)
+
+		if password == "" {
+			return
+		}
+
+		if testPassword(archivePath, password) {
+			handleExtract(archivePath, extractPath, password, false)
+			//保存密码到passwd.txt文件
+			if err := savePasswordToFile(password); err != nil {
+				fmt.Printf("保存密码失败: %v\n", err)
+			} else {
+				fmt.Printf("新密码【%s】已保存到passwd.txt文件: \n", password)
+			}
+			return
+		} else {
+			fmt.Println("\n密码错误！请重试或回车退出")
+		}
+	}
+}
+
+//	函数说明：处理压缩文件
+//
+// 参数：
+// archivePath: 压缩文件路径
+// passwords: 密码列表
+// passwordsInfo: 使用的密码文件信息
+func processArchive(archivePath string, passwords []string, passwordsInfo string) {
+	// 获取文件信息
+	fileInfo, err := os.Stat(archivePath)
+	if err != nil {
+		fmt.Printf("无法获取文件信息: %v\n", err)
+		return
+	}
+
+	fmt.Printf("正在处理文件: %s\n", formatPath(archivePath))
+	fmt.Printf("文件大小: %s\n", formatFileSize(fileInfo.Size()))
+
+	// 检查文件类型并显示
+	fileType := getFileType(archivePath)
+	fmt.Printf("文件类型: %s\n", getFileTypeDesc(fileType))
+
+	// 获取解压路径
+	extractPath := getDefaultExtractPath(archivePath)
+
+	// 获取第一个分卷
+	firstVolume, err := getFirstVolumePath(archivePath)
+	if err != nil {
+		fmt.Printf("\n%v\n", err)
+		return
+	}
+
+	if firstVolume != archivePath {
+		fmt.Printf("使用第一个分卷: %s\n", firstVolume)
+		archivePath = firstVolume
+	}
+
+	// 检查是否需要密码
+	if !isPasswordRequired(fileType) {
+		fmt.Println("检测到无需密码的文件格式，直接解压...")
+		if err := extractArchive(archivePath, "", extractPath); err != nil {
+			fmt.Printf("解压失败: %v\n", err)
+		} else {
+			fmt.Printf("\n解压成功！\n")
+			fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
+		}
+		return
+	}
+
+	// 需要密码的文件处理逻辑
+	if len(passwords) > 0 {
+		fmt.Println(passwordsInfo)
+	}
+	fmt.Println("\n开始尝试破解...")
+
+	// 尝试使用找到的密码解压
+	if foundPassword, err := crackArchive(archivePath, passwords); err == nil {
+		handleExtract(archivePath, extractPath, foundPassword, true)
+	} else {
+		handleCrackFailed(archivePath, extractPath)
+	}
+}
+
+// clearScreen 清除屏幕内容
+func clearScreen() {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		cmd.Run()
+	default: // linux, darwin, etc
+		fmt.Print("\033[H\033[2J") // ANSI 转义序列清屏
+	}
+	fmt.Printf("---------------------------------------------------------------------\n")
+	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
+	fmt.Printf("BY:hillghost86 \n")
+	fmt.Printf("github:https://github.com/hillghost86/7zrpw\n")
+	fmt.Printf("---------------------------------------------------------------------\n")
 }
 
 // 函数说明：安装右键菜单
@@ -709,385 +1092,6 @@ func uninstallContext() error {
 	fmt.Println("右键菜单卸载成功！")
 	fmt.Println("----------------------------------")
 	return nil
-}
-
-// 函数说明：判断是否需要密码
-// 参数：
-// fileType: 文件类型
-// 返回：是否需要密码
-func isPasswordRequired(fileType int) bool {
-	switch fileType {
-	case TYPE_ZIP, TYPE_ZIP_PART,
-		TYPE_RAR, TYPE_RAR_PART,
-		TYPE_7Z,
-		TYPE_ARJ,
-		TYPE_LZH:
-		return true
-	case TYPE_TAR, TYPE_TAR_PART,
-		TYPE_GZ,
-		TYPE_BZ2,
-		TYPE_XZ,
-		TYPE_ISO,
-		TYPE_WIM,
-		TYPE_CAB:
-		return false
-	default:
-		return true // 未知格式默认需要密码
-	}
-}
-
-// 函数说明：读取所有可能的密码文件并合并密码
-// 返回：密码列表，使用的密码文件信息，错误信息
-
-func getAllPasswords() ([]string, string, error) {
-	// 获取可能的密码文件路径
-	exePath, _ := os.Executable()
-	exeDir := filepath.Dir(exePath)
-	currentDir, _ := os.Getwd()
-
-	// 按优先级顺序存储密码文件路径
-	dictPaths := []string{
-		filepath.Join(currentDir, "passwd.txt"), // 当前目录
-		filepath.Join(exeDir, "passwd.txt"),     // 程序目录
-	}
-	// 对路径进行去重
-	var uniquePaths []string
-	seen := make(map[string]bool)
-
-	for _, path := range dictPaths {
-		absPath, err := filepath.Abs(path)
-		if err != nil {
-			continue
-		}
-		if !seen[absPath] {
-			seen[absPath] = true
-			uniquePaths = append(uniquePaths, path)
-		}
-	}
-
-	// 用map去重
-	passwordMap := make(map[string]bool)
-	var usedPaths []string
-	var totalCount int
-
-	// 读取所有密码文件
-	for _, path := range uniquePaths {
-		if passwords, err := readPasswordFile(path); err == nil {
-			usedPaths = append(usedPaths, path)
-			for _, pass := range passwords {
-				if !passwordMap[pass] {
-					passwordMap[pass] = true
-					totalCount++
-				}
-			}
-		}
-	}
-
-	// 如果没有找到任何密码文件
-	if len(passwordMap) == 0 {
-		return nil, "", fmt.Errorf("未找到密码文件")
-	}
-
-	// 转换map为切片
-	var uniquePasswords []string
-	for pass := range passwordMap {
-		uniquePasswords = append(uniquePasswords, pass)
-	}
-
-	// 生成使用的密码文件信息
-	var usedPathsInfo string
-	if len(usedPaths) > 0 {
-		usedPathsInfo = "使用的密码文件:\n"
-		for i, path := range usedPaths {
-			passwords, err := readPasswordFile(path)
-			if err != nil {
-				usedPathsInfo += fmt.Sprintf("%d. %s (读取失败: %v)\n", i+1, path, err)
-			} else {
-				usedPathsInfo += fmt.Sprintf("%d. %s (包含 %d 个密码)\n", i+1, path, len(passwords))
-			}
-		}
-		usedPathsInfo += fmt.Sprintf("\n去重后共 %d 个密码", len(uniquePasswords))
-	}
-
-	return uniquePasswords, usedPathsInfo, nil
-}
-
-// 函数说明：获取文件类型描述
-// 参数：
-// fileType: 文件类型
-// 返回：文件类型描述
-func getFileTypeDesc(fileType int) string {
-	switch fileType {
-	case TYPE_ZIP:
-		return "ZIP 压缩文件"
-	case TYPE_RAR:
-		return "RAR 压缩文件"
-	case TYPE_7Z:
-		return "7Z 压缩文件"
-	case TYPE_ZIP_PART:
-		return "ZIP 分卷压缩文件"
-	case TYPE_RAR_PART:
-		return "RAR 分卷压缩文件"
-	case TYPE_7Z_PART:
-		return "7Z 分卷压缩文件"
-	case TYPE_GZ:
-		return "GZIP 压缩文件"
-	case TYPE_BZ2:
-		return "BZIP2 压缩文件"
-	case TYPE_TAR:
-		return "TAR 归档文件"
-	case TYPE_TAR_PART:
-		return "TAR 分卷归档文件"
-	case TYPE_XZ:
-		return "XZ 压缩文件"
-	case TYPE_CAB:
-		return "CAB 压缩文件"
-	case TYPE_ISO:
-		return "ISO 镜像文件"
-	case TYPE_ARJ:
-		return "ARJ 压缩文件"
-	case TYPE_LZH:
-		return "LZH 压缩文件"
-	case TYPE_WIM:
-		return "WIM 映像文件"
-	default:
-		return "未知文件类型"
-	}
-}
-
-// 函数说明：格式化文件大小
-// 参数：
-// size: 文件大小
-// 返回：文件大小描述
-func formatFileSize(size int64) string {
-	const unit = 1024
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	div, exp := int64(unit), 0
-	for n := size / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
-}
-
-// 获取默认解压路径（去掉扩展名和_files后缀）
-func getDefaultExtractPath(archivePath string) string {
-	// 获取文件名（不含扩展名）
-	baseName := filepath.Base(archivePath)
-	ext := filepath.Ext(baseName)
-	nameWithoutExt := strings.TrimSuffix(baseName, ext)
-
-	// 如果是分卷文件，去除压缩文件扩展名
-	switch {
-	case strings.HasSuffix(nameWithoutExt, ".7z"):
-		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".7z")
-	case strings.HasSuffix(nameWithoutExt, ".zip"):
-		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".zip")
-	case strings.HasSuffix(nameWithoutExt, ".rar"):
-		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".rar")
-	}
-
-	// 返回解压目录名（不加_files后缀）
-	return filepath.Join(filepath.Dir(archivePath), nameWithoutExt)
-}
-
-// 获取并格式化路径显示
-func formatPath(path string) string {
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Sprintf("%s (无法获取完整路径)", path)
-	}
-	return absPath
-}
-
-// 添加新函数：保存密码到passwd.txt文件
-// 参数：
-// password: 密码
-// 返回：错误信息
-func savePasswordToFile(password string) error {
-	// 获取程序路径
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("获取程序路径失败: %v", err)
-	}
-
-	// 构建密码文件路径
-	passwdPath := filepath.Join(filepath.Dir(exePath), "passwd.txt")
-	//不存在passwd.txt则创建
-	if _, err := os.Stat(passwdPath); os.IsNotExist(err) {
-		os.Create(passwdPath)
-	}
-
-	// 读取现有密码，避免重复
-	existingPasswords := make(map[string]bool)
-	if content, err := os.ReadFile(passwdPath); err == nil {
-		lines := strings.Split(string(content), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				existingPasswords[line] = true
-			}
-		}
-	}
-
-	// 如果密码已存在，直接返回
-	if existingPasswords[password] {
-		return nil
-	}
-
-	// 追加新密码到文件
-	f, err := os.OpenFile(passwdPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("打开密码文件失败: %v", err)
-	}
-	defer f.Close()
-
-	if _, err := f.WriteString(password + "\n"); err != nil {
-		return fmt.Errorf("写入密码失败: %v", err)
-	}
-
-	return nil
-}
-
-// 修改 handleExtract 函数
-// 参数：
-// archivePath: 压缩文件路径
-// extractPath: 解压路径
-// password: 密码
-// isFound: 是否找到密码
-func handleExtract(archivePath string, extractPath string, password string, isFound bool) {
-	if isFound {
-		if password == "" {
-			fmt.Println("\n文件无密码")
-		} else {
-			fmt.Printf("\n找到正确密码: [%s]\n", password)
-		}
-	} else {
-		fmt.Printf("\n密码正确: [%s]\n", password)
-	}
-
-	fmt.Println("正在解压文件...")
-	if err := extractArchive(archivePath, password, extractPath); err != nil {
-		fmt.Printf("解压失败: %v\n", err)
-	} else {
-		fmt.Printf("\n解压成功！\n")
-		fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
-	}
-}
-
-// 处理密码破解失败的情况
-func handleCrackFailed(archivePath string, extractPath string) {
-	fmt.Println("\n密码破解失败！")
-
-	for {
-		fmt.Print("请输入新的密码(直接回车退出): ")
-		var password string
-		fmt.Scanln(&password)
-
-		if password == "" {
-			return
-		}
-
-		if testPassword(archivePath, password) {
-			handleExtract(archivePath, extractPath, password, false)
-			//保存密码到passwd.txt文件
-			if err := savePasswordToFile(password); err != nil {
-				fmt.Printf("保存密码失败: %v\n", err)
-			} else {
-				fmt.Printf("密码【%s】已保存到passwd.txt文件: \n", password)
-			}
-			return
-		} else {
-			fmt.Println("\n密码错误！请重试或回车退出")
-		}
-	}
-}
-
-//	函数说明：处理压缩文件
-//
-// 参数：
-// archivePath: 压缩文件路径
-// passwords: 密码列表
-// passwordsInfo: 使用的密码文件信息
-func processArchive(archivePath string, passwords []string, passwordsInfo string) {
-	// 获取文件信息
-	fileInfo, err := os.Stat(archivePath)
-	if err != nil {
-		fmt.Printf("无法获取文件信息: %v\n", err)
-		return
-	}
-
-	fmt.Printf("正在处理文件: %s\n", formatPath(archivePath))
-	fmt.Printf("文件大小: %s\n", formatFileSize(fileInfo.Size()))
-
-	// 检查文件类型并显示
-	fileType := getFileType(archivePath)
-	fmt.Printf("文件类型: %s\n", getFileTypeDesc(fileType))
-
-	// 获取解压路径
-	extractPath := getDefaultExtractPath(archivePath)
-
-	// // 创建解压目录
-	// if err := os.MkdirAll(extractPath, 0755); err != nil {
-	// 	fmt.Printf("创建解压目录失败: %v\n", err)
-	// 	return
-	// }
-
-	// 获取第一个分卷
-	firstVolume, err := getFirstVolumePath(archivePath)
-	if err != nil {
-		fmt.Printf("\n%v\n", err)
-		return
-	}
-
-	if firstVolume != archivePath {
-		fmt.Printf("使用第一个分卷: %s\n", firstVolume)
-		archivePath = firstVolume
-	}
-
-	// 检查是否需要密码
-	if !isPasswordRequired(fileType) {
-		fmt.Println("检测到无需密码的文件格式，直接解压...")
-		if err := extractArchive(archivePath, "", extractPath); err != nil {
-			fmt.Printf("解压失败: %v\n", err)
-		} else {
-			fmt.Printf("\n解压成功！\n")
-			fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
-		}
-		return
-	}
-
-	// 需要密码的文件处理逻辑
-	if len(passwords) > 0 {
-		fmt.Println(passwordsInfo)
-	}
-	fmt.Println("\n开始尝试破解...")
-
-	// 尝试使用找到的密码解压
-	if foundPassword, err := crackArchive(archivePath, passwords); err == nil {
-		handleExtract(archivePath, extractPath, foundPassword, true)
-	} else {
-		handleCrackFailed(archivePath, extractPath)
-	}
-}
-
-// clearScreen 清除屏幕内容
-func clearScreen() {
-	switch runtime.GOOS {
-	case "windows":
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-	default: // linux, darwin, etc
-		fmt.Print("\033[H\033[2J") // ANSI 转义序列清屏
-	}
-	fmt.Printf("---------------------------------------------------------------------\n")
-	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
-	fmt.Printf("BY:hillghost86 \n")
-	fmt.Printf("github:https://github.com/hillghost86/7zrpw\n")
-	fmt.Printf("---------------------------------------------------------------------\n")
 }
 
 // 主函数
