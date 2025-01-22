@@ -274,27 +274,55 @@ func isPasswordRequired(fileType int) bool {
 	}
 }
 
-// 函数说明：测试密码
-// 参数：
-// archivePath: 压缩文件路径
-// password: 密码
-// 返回：是否成功
+// getTimeoutByFileSize 根据文件大小计算超时时间
+// 小于1G为2秒，每增加1G增加1秒，最多5秒
+func getTimeoutByFileSize(filePath string) time.Duration {
+	// 获取文件信息
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return 2 * time.Second // 出错时使用默认值
+	}
+
+	// 获取文件大小（以GB为单位）
+	sizeInGB := float64(fileInfo.Size()) / (1024 * 1024 * 1024)
+
+	// 计算超时时间
+	// 基础时间2秒
+	timeout := 2.0
+	if sizeInGB > 2.0 {
+		// 每超过1GB增加1秒
+		timeout += math.Floor(sizeInGB - 2.0)
+	}
+
+	// 限制最大超时时间为5秒
+	if timeout > 5.0 {
+		timeout = 5.0
+	}
+
+	return time.Duration(timeout) * time.Second
+}
+
+/*
+*
+函数说明：测试密码
+参数：
+archivePath: 压缩文件路径
+password: 密码
+返回：是否成功
+*/
 func testPassword(archivePath, password string) bool {
 	// 构建测试命令
 	args := []string{
-		"t",             // 测试命令
-		"-p" + password, // 密码
-		archivePath,     // 文件路径
+		"t",
+		"-p" + password,
+		archivePath,
 	}
 
-	// 创建命令
 	cmd := exec.Command(getSevenZipPath(), args...)
 	cmd.Env = append(os.Environ(), "LANG=C.UTF-8")
 
-	// 创建结果通道
 	resultChan := make(chan bool, 1)
 
-	// 启动命令并检查输出
 	go func() {
 		output, _ := cmd.CombinedOutput()
 		outputStr := string(output)
@@ -303,7 +331,7 @@ func testPassword(archivePath, password string) bool {
 			resultChan <- true
 			return
 		}
-		// 检查错误标记
+
 		if strings.Contains(outputStr, "Cannot open encrypted archive") ||
 			strings.Contains(outputStr, "ERROR:") ||
 			strings.Contains(outputStr, "Data Error in encrypted") ||
@@ -311,22 +339,23 @@ func testPassword(archivePath, password string) bool {
 			strings.Contains(outputStr, "ERROR: Wrong password") ||
 			strings.Contains(outputStr, "Wrong password") ||
 			strings.Contains(outputStr, "Archives with Errors") {
-			resultChan <- false // 返回false
+			resultChan <- false
 			return
 		}
-		resultChan <- true // 返回true
+		resultChan <- true
 	}()
+
+	// 获取动态超时时间
+	timeout := getTimeoutByFileSize(archivePath)
 
 	// 等待结果或超时
 	select {
-	case result := <-resultChan: // 获取结果
-		return result // 返回结果
-	case <-time.After(2 * time.Second):
-		// 2秒内没有错误标记，说明是正确密码
-		// 确保检查大文件时，7z.exe会一直检查整个文件直至检查结束。
-		//当大于2秒时，基本可以认为密码正确
-		cmd.Process.Kill() // 强制终止命令
-		return true        // 返回true
+	case result := <-resultChan:
+		return result
+	case <-time.After(timeout):
+		// 超时时间到，强制终止命令
+		cmd.Process.Kill()
+		return true
 	}
 }
 
@@ -363,10 +392,13 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 	}
 
 	// 计算建议的线程数 1.5倍CPU核心数，向上取整
-	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * 1.5))
+	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) / 2))
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 
 	// 当密码数量较少时（小于等于CPU核心数的2倍），使用同步处理
-	if len(passwords) <= runtime.NumCPU()*2 {
+	if len(passwords) <= runtime.NumCPU() {
 		for i, password := range passwords {
 			// 显示进度
 			fmt.Print(formatProgress(i+1, len(passwords), password))
@@ -378,7 +410,7 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 		return "", fmt.Errorf("未找到正确密码")
 	}
 
-	// 当密码数量较多时（大于CPU核心数的2倍），使用多线程处理
+	// 当密码数量较多时（大于等于CPU核心数的2倍），使用多线程处理
 	fmt.Println("多线程处理，线程数：", numWorkers)
 
 	// 创建任务和结果通道
@@ -389,23 +421,30 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 	// 创建一个单独的goroutine来处理进度显示
 	progressDone := make(chan bool)
 	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
 		defer close(progressDone)
+
 		lastProgress := 0
 		for {
 			select {
 			case <-done:
 				return
-			default:
+			case <-ticker.C:
 				progress := int(currentProgress.Load())
-				// 只有当进度变化时才更新显示
 				if progress != lastProgress && progress > 0 {
 					fmt.Print(formatProgress(progress, len(passwords), passwords[progress-1]))
 					lastProgress = progress
 				}
-				//time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}()
+
+	// 添加原子变量控制结果状态
+	var foundValidPassword atomic.Bool
+
+	// 添加原子变量控制done通道的关闭
+	var isDoneClosed atomic.Bool
 
 	// 启动工作线程
 	var wg sync.WaitGroup
@@ -414,17 +453,27 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 		go func() {
 			defer wg.Done()
 			for idx := range tasks {
-				password := passwords[idx]
-
-				// 只更新计数器，不直接打印
-				currentProgress.Add(1)
-
-				if testPassword(archivePath, password) {
-					select {
-					case results <- password:
-					case <-done:
-					}
+				select {
+				case <-done:
 					return
+				default:
+					password := passwords[idx]
+					currentProgress.Add(1)
+
+					// 给每个密码验证充足的时间
+					time.Sleep(10 * time.Millisecond) // 在验证之前稍作等待，避免资源竞争
+
+					if testPassword(archivePath, password) {
+						//打印密码
+						//fmt.Println("11111找到密码：", password)
+						// 确保只有一个线程能发送结果
+						if !isDoneClosed.Swap(true) {
+							foundValidPassword.Store(true)
+							results <- password
+							close(done)
+						}
+						return
+					}
 				}
 			}
 		}()
@@ -442,19 +491,25 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 		close(tasks)
 	}()
 
+	// 等待结果收集
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	// 等待结果或所有工作线程完成
 	foundPassword, ok := <-results
 
-	// 立即停止所有goroutine
-	close(done)
+	// 确保进度显示goroutine退出
+	if !isDoneClosed.Load() {
+		close(done)
+	}
+	<-progressDone // 等待进度显示goroutine完全退出
 
 	// 显示最终进度
-	if ok {
-		// 找到密码时显示当前进度
+	if ok && foundValidPassword.Load() {
 		progress := int(currentProgress.Load())
 		fmt.Print(formatProgress(progress, len(passwords), foundPassword))
-
-		// 最终验证
 		if testPassword(archivePath, foundPassword) {
 			return foundPassword, nil
 		}
@@ -855,7 +910,7 @@ func formatFileSize(size int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
-// 函数说明：获取默认解压路径（去掉扩展名和_files后缀）
+// 函数说明：获取默认解压路径（去掉扩展名和分卷标识）
 // 参数：
 // archivePath: 压缩文件路径
 // 返回：解压路径
@@ -865,7 +920,7 @@ func getDefaultExtractPath(archivePath string) string {
 	ext := filepath.Ext(baseName)
 	nameWithoutExt := strings.TrimSuffix(baseName, ext)
 
-	// 如果是分卷文件，去除压缩文件扩展名
+	// 如果是分卷文件，去除分卷标识
 	switch {
 	case strings.HasSuffix(nameWithoutExt, ".7z"):
 		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".7z")
@@ -875,7 +930,12 @@ func getDefaultExtractPath(archivePath string) string {
 		nameWithoutExt = strings.TrimSuffix(nameWithoutExt, ".rar")
 	}
 
-	// 返回解压目录名（不加_files后缀）
+	// RAR分卷去除分卷标识（如 .part1, .part2 等）
+	if idx := strings.LastIndex(nameWithoutExt, ".part"); idx != -1 {
+		nameWithoutExt = nameWithoutExt[:idx]
+	}
+
+	// 返回解压目录名
 	return filepath.Join(filepath.Dir(archivePath), nameWithoutExt)
 }
 
@@ -984,7 +1044,7 @@ func handleCrackFailed(archivePath string, extractPath string) {
 			if err := savePasswordToFile(password); err != nil {
 				fmt.Printf("保存密码失败: %v\n", err)
 			} else {
-				fmt.Printf("新密码【%s】已保存到passwd.txt文件: \n", password)
+				fmt.Printf("新密码【%s】已保存到passwd.txt文件。 \n", password)
 			}
 			return
 		} else {
