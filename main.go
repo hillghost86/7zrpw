@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -83,6 +86,9 @@ const (
 	TYPE_LZH             // .lzh, .lha
 	TYPE_WIM             // .wim, .swm (分段 WIM)
 )
+
+// 创建原子计数器用于同步进度显示
+var currentProgress atomic.Int32
 
 // 说明：初始化7z.exe和7z.dll
 func init() {
@@ -299,9 +305,11 @@ func testPassword(archivePath, password string) bool {
 		}
 		// 检查错误标记
 		if strings.Contains(outputStr, "Cannot open encrypted archive") ||
-			strings.Contains(outputStr, "Headers Error") ||
+			strings.Contains(outputStr, "ERROR:") ||
+			strings.Contains(outputStr, "Data Error in encrypted") ||
 			strings.Contains(outputStr, "Can't open as archive") ||
 			strings.Contains(outputStr, "ERROR: Wrong password") ||
+			strings.Contains(outputStr, "Wrong password") ||
 			strings.Contains(outputStr, "Archives with Errors") {
 			resultChan <- false // 返回false
 			return
@@ -354,18 +362,106 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 		return "", nil
 	}
 
-	// 逐个尝试密码
-	for i, pass := range passwords {
-		// 显示进度条
-		fmt.Print(formatProgress(i+1, len(passwords), pass))
+	// 计算建议的线程数 1.5倍CPU核心数，向上取整
+	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) * 1.5))
 
-		// 测试密码
-		if testPassword(archivePath, pass) {
-			fmt.Print("\r" + strings.Repeat(" ", 100) + "\r")
-			return pass, nil
+	// 当密码数量较少时（小于等于CPU核心数的2倍），使用同步处理
+	if len(passwords) <= runtime.NumCPU()*2 {
+		for i, password := range passwords {
+			// 显示进度
+			fmt.Print(formatProgress(i+1, len(passwords), password))
+
+			if testPassword(archivePath, password) {
+				return password, nil
+			}
+		}
+		return "", fmt.Errorf("未找到正确密码")
+	}
+
+	// 当密码数量较多时（大于CPU核心数的2倍），使用多线程处理
+	fmt.Println("多线程处理，线程数：", numWorkers)
+
+	// 创建任务和结果通道
+	tasks := make(chan int, len(passwords))
+	results := make(chan string)
+	done := make(chan bool)
+
+	// 创建一个单独的goroutine来处理进度显示
+	progressDone := make(chan bool)
+	go func() {
+		defer close(progressDone)
+		lastProgress := 0
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				progress := int(currentProgress.Load())
+				// 只有当进度变化时才更新显示
+				if progress != lastProgress && progress > 0 {
+					fmt.Print(formatProgress(progress, len(passwords), passwords[progress-1]))
+					lastProgress = progress
+				}
+				//time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}()
+
+	// 启动工作线程
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range tasks {
+				password := passwords[idx]
+
+				// 只更新计数器，不直接打印
+				currentProgress.Add(1)
+
+				if testPassword(archivePath, password) {
+					select {
+					case results <- password:
+					case <-done:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	// 分发任务
+	go func() {
+		for i := range passwords {
+			select {
+			case tasks <- i:
+			case <-done:
+				return
+			}
+		}
+		close(tasks)
+	}()
+
+	// 等待结果或所有工作线程完成
+	foundPassword, ok := <-results
+
+	// 立即停止所有goroutine
+	close(done)
+
+	// 显示最终进度
+	if ok {
+		// 找到密码时显示当前进度
+		progress := int(currentProgress.Load())
+		fmt.Print(formatProgress(progress, len(passwords), foundPassword))
+
+		// 最终验证
+		if testPassword(archivePath, foundPassword) {
+			return foundPassword, nil
 		}
 	}
 
+	// 显示100%进度
+	fmt.Print(formatProgress(len(passwords), len(passwords), passwords[len(passwords)-1]))
 	return "", fmt.Errorf("未找到正确密码")
 }
 
@@ -594,29 +690,42 @@ func findCompressFiles(dir string) []string {
 // 函数说明：读取密码文件
 // 参数：
 // path: 密码文件路径
-// 返回：密码列表，错误信息
-func readPasswordFile(path string) (<-chan string, error) {
+// 返回：密码通道，密码数量，错误信息
+func readPasswordFile(path string) (<-chan string, int, error) {
 	passwordChan := make(chan string)
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
+	// 先统计有效密码数量
+	var count int
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if password := strings.TrimSpace(scanner.Text()); password != "" {
+			count++
+		}
+	}
+
+	// 重置文件指针到开始位置
+	file.Seek(0, 0)
+
+	// 启动goroutine读取密码
 	go func() {
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			passwordChan <- strings.TrimSpace(scanner.Text())
+			if password := strings.TrimSpace(scanner.Text()); password != "" {
+				passwordChan <- password
+			}
 		}
 		close(passwordChan)
 	}()
 
-	return passwordChan, nil
+	return passwordChan, count, nil
 }
 
-// 函数说明：读取所有可能的密码文件并合并密码
-// 返回：密码列表，使用的密码文件信息，错误信息
-
+// 函数说明：获取所有密码
 func getAllPasswords() ([]string, string, error) {
 	// 获取可能的密码文件路径
 	exePath, _ := os.Executable()
@@ -646,25 +755,25 @@ func getAllPasswords() ([]string, string, error) {
 	// 用map去重
 	passwordMap := make(map[string]bool)
 	var usedPaths []string
-	var totalCount int
+	filePasswords := make(map[string]int)
 
 	// 读取所有密码文件
 	for _, path := range uniquePaths {
-		if passwordChan, err := readPasswordFile(path); err == nil {
-			usedPaths = append(usedPaths, path)
-			// 从 channel 中读取密码
-			for password := range passwordChan {
-				if !passwordMap[password] {
+		if passwordChan, count, err := readPasswordFile(path); err == nil {
+			if count > 0 {
+				usedPaths = append(usedPaths, path)
+				filePasswords[path] = count
+				// 从 channel 中读取密码
+				for password := range passwordChan {
 					passwordMap[password] = true
-					totalCount++
 				}
 			}
 		}
 	}
 
-	// 如果没有找到任何密码文件
+	// 如果没有找到任何密码
 	if len(passwordMap) == 0 {
-		return nil, "", fmt.Errorf("未找到密码文件")
+		return nil, "", fmt.Errorf("未找到密码文件或密码为空")
 	}
 
 	// 转换map为切片
@@ -678,12 +787,7 @@ func getAllPasswords() ([]string, string, error) {
 	if len(usedPaths) > 0 {
 		usedPathsInfo = "使用的密码文件:\n"
 		for i, path := range usedPaths {
-			passwords, err := readPasswordFile(path)
-			if err != nil {
-				usedPathsInfo += fmt.Sprintf("%d. %s (读取失败: %v)\n", i+1, path, err)
-			} else {
-				usedPathsInfo += fmt.Sprintf("%d. %s (包含 %d 个密码)\n", i+1, path, len(passwords))
-			}
+			usedPathsInfo += fmt.Sprintf("%d. %s (包含 %d 个密码)\n", i+1, path, filePasswords[path])
 		}
 		usedPathsInfo += fmt.Sprintf("\n去重后共 %d 个密码", len(uniquePasswords))
 	}
@@ -964,7 +1068,7 @@ func clearScreen() {
 	fmt.Printf("---------------------------------------------------------------------\n")
 	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
 	fmt.Printf("BY:hillghost86 \n")
-	fmt.Printf("github:https://github.com/hillghost86/7zrpw\n")
+	fmt.Printf("https://github.com/hillghost86/7zrpw\n")
 	fmt.Printf("---------------------------------------------------------------------\n")
 }
 
