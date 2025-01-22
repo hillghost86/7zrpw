@@ -274,8 +274,15 @@ func isPasswordRequired(fileType int) bool {
 	}
 }
 
-// getTimeoutByFileSize 根据文件大小计算超时时间
-// 小于1G为2秒，每增加1G增加1秒，最多5秒
+// 函数说明：根据文件大小计算超时时间
+// 小于2G为2秒，每增加1G增加1秒，最多5秒
+// 为多线程测试密码提供超时时间
+// 多线程测试时，当CPU使用过高时，原来的2秒会导致误判，错误的密码也会被认为是正确密码
+// 增加超时时间，可以减少误判，所以改为根据文件大小计算超时时间
+// 暂时没有更好的解决方法
+// 在不使用多线程时，使用2秒超时时间不会出现误判
+// 有哪位大神有更好的解决方法，请告诉我，
+// 谢谢
 func getTimeoutByFileSize(filePath string) time.Duration {
 	// 获取文件信息
 	fileInfo, err := os.Stat(filePath)
@@ -311,7 +318,7 @@ password: 密码
 返回：是否成功
 */
 func testPassword(archivePath, password string) bool {
-	// 构建测试命令
+	// 构建测试命令，使用7z的t命令测试文件完整性，来判断密码是否正确
 	args := []string{
 		"t",
 		"-p" + password,
@@ -327,11 +334,13 @@ func testPassword(archivePath, password string) bool {
 		output, _ := cmd.CombinedOutput()
 		outputStr := string(output)
 
+		// 如果输出包含以下信息，说明密码正确
 		if strings.Contains(outputStr, "Everything is Ok") {
 			resultChan <- true
 			return
 		}
 
+		// 如果输出包含以下错误信息，说明密码错误
 		if strings.Contains(outputStr, "Cannot open encrypted archive") ||
 			strings.Contains(outputStr, "ERROR:") ||
 			strings.Contains(outputStr, "Data Error in encrypted") ||
@@ -342,10 +351,11 @@ func testPassword(archivePath, password string) bool {
 			resultChan <- false
 			return
 		}
+
 		resultChan <- true
 	}()
 
-	// 获取动态超时时间
+	// 获取动态检测超时时间
 	timeout := getTimeoutByFileSize(archivePath)
 
 	// 等待结果或超时
@@ -353,7 +363,10 @@ func testPassword(archivePath, password string) bool {
 	case result := <-resultChan:
 		return result
 	case <-time.After(timeout):
-		// 超时时间到，强制终止命令
+		// 如果密码正确，7z.exe会测试整个文件，直到测试结束。
+		// 文件很大的时候，7z.exe会测试很长时间，所以超时时间到，强制终止命令
+		// 如果密码错误，7z.exe会很快返回错误标记
+		// 一定时间内内没有错误标记，说明是正确密码，直接返回正确
 		cmd.Process.Kill()
 		return true
 	}
@@ -464,8 +477,6 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 					time.Sleep(10 * time.Millisecond) // 在验证之前稍作等待，避免资源竞争
 
 					if testPassword(archivePath, password) {
-						//打印密码
-						//fmt.Println("11111找到密码：", password)
 						// 确保只有一个线程能发送结果
 						if !isDoneClosed.Swap(true) {
 							foundValidPassword.Store(true)
@@ -510,6 +521,8 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 	if ok && foundValidPassword.Load() {
 		progress := int(currentProgress.Load())
 		fmt.Print(formatProgress(progress, len(passwords), foundPassword))
+		fmt.Println("\n正在进行二次密码验证确认，请稍等...")
+		//由于testPassword函数测试密码在多线程时，会误判，所以需要再测试一次
 		if testPassword(archivePath, foundPassword) {
 			return foundPassword, nil
 		}
