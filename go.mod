@@ -1,6 +1,6 @@
 module 7zrpw
 
-go 1.23.4
+go 1.21
 
 require (
 	github.com/h2non/filetype v1.1.3
@@ -8,4 +8,4 @@ require (
 	golang.org/x/text v0.21.0
 )
 
-require golang.org/x/image v0.23.0 // indirect
+require github.com/golang-jwt/jwt/v5 v5.2.1

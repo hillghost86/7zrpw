@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.4] - 2025-01-29
+
+### 新增
+- 多线程处理问题太多，暂时退回同步模式
+
+
 ## [v0.1.3] - 2025-01-22
 
 ### 新增
