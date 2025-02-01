@@ -8,6 +8,8 @@
 # 测试文件
 *.test
 *.out
+/test/
+/test*/
 
 #备份文件
 *.bak
@@ -29,8 +31,7 @@ func.md
 
 # 调试文件
 debug
-/test/
-/testdata/
+
 
 # Windows
 Thumbs.db
