@@ -9,14 +9,20 @@
 *.test
 *.out
 
+#备份文件
+*.bak
+
 # 密码文件
 passwd*.txt*
+passwd*
 
 # IDE 相关
 .idea/
 .vscode/
 *.swp
 *.swo
+func.md
+
 
 # 依赖目录
 /vendor/
@@ -24,6 +30,7 @@ passwd*.txt*
 # 调试文件
 debug
 /test/
+/testdata/
 
 # Windows
 Thumbs.db
@@ -35,5 +42,7 @@ Desktop.ini
 # 其他
 /tools/
 
+# 服务端
+#/server/
 
 

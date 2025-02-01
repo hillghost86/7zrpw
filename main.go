@@ -56,7 +56,7 @@ const (
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
-	VERSION = "v0.1.4"
+	VERSION = "v0.1.5"
 )
 
 // 定义ZIP文件头结构
@@ -94,7 +94,16 @@ const (
 	TYPE_WIM             // .wim, .swm (分段 WIM)
 )
 
-// 说明：初始化7z.exe和7z.dll
+// 版本信息结构
+type VersionInfo struct {
+	Version     string `json:"version"`
+	DownloadURL string `json:"download_url"`
+	ReleaseNote string `json:"release_note"`
+	MD5         string `json:"md5"`
+	ForceUpdate bool   `json:"force_update"` // 确保字段名完全匹配
+}
+
+// 在 init() 函数中添加配置文件初始化
 func init() {
 	// 确保临时目录存在
 	tempDir := filepath.Join(os.TempDir(), "7zrpw")
@@ -364,23 +373,36 @@ func formatProgress(current, total int, currentPass string) string {
 // passwords: 密码列表
 // 返回：密码，错误信息
 func crackArchive(archivePath string, passwords []string) (string, error) {
+	startTime := time.Now() // 记录开始时间
+
 	// 首先尝试空密码
 	if testPassword(archivePath, "") {
+		elapsed := time.Since(startTime)
+		fmt.Printf("\n破解用时: %s\n", formatDuration(elapsed))
 		return "", nil
 	}
 
+	// 记录已尝试的密码数量
+	testedCount := 0
+
 	// 逐个尝试密码
 	for i, pass := range passwords {
+		testedCount++
 		// 显示进度条
 		fmt.Print(formatProgress(i+1, len(passwords), pass))
 
 		// 测试密码
 		if testPassword(archivePath, pass) {
-			fmt.Print("\r" + strings.Repeat(" ", 100) + "\r")
+			elapsed := time.Since(startTime)
+			speed := float64(testedCount) / elapsed.Seconds()
+			fmt.Printf("\n破解用时: %s (平均 %.1f 密码/秒)\n", formatDuration(elapsed), speed)
 			return pass, nil
 		}
 	}
 
+	elapsed := time.Since(startTime)
+	speed := float64(testedCount) / elapsed.Seconds()
+	fmt.Printf("\n破解用时: %s (平均 %.1f 密码/秒)\n", formatDuration(elapsed), speed)
 	return "", fmt.Errorf("未找到正确密码")
 }
 
@@ -1290,8 +1312,37 @@ func generateJWT(appKey, appSecret string, params map[string]interface{}) (strin
 	return token.SignedString([]byte(appSecret))
 }
 
+// CheckUpdate 检查更新
+func CheckUpdate(force bool) error {
+	// 创建更新管理器
+	manager, err := NewUpdateManager(VERSION)
+	if err != nil {
+		return fmt.Errorf("创建更新管理器失败: %v", err)
+	}
+
+	// 执行更新检查
+	if err := manager.CheckUpdate(force); err != nil {
+		return err
+	}
+
+	// 如果用户选择不更新，直接返回
+	return nil
+}
+
 // 主函数
 func main() {
+	// 创建更新管理器
+	updateManager, err := NewUpdateManager(VERSION)
+	if err != nil {
+		fmt.Printf("初始化更新管理器失败: %v\n", err)
+		return
+	}
+
+	// 检查更新
+	if err := updateManager.CheckUpdate(false); err != nil {
+		fmt.Printf("检查更新失败: %v\n", err)
+	}
+
 	clearScreen()
 	//查询7zrpw.exe所在目录是否有passwd.txt文件，如果没有则创建
 	exePath, err := os.Executable()
@@ -1373,16 +1424,16 @@ func main() {
 			fmt.Println("\n发现以下文件和目录：")
 			// 先显示压缩文件
 			for i, file := range files {
-				fmt.Printf("%d: %s\n", i+1, file)
+				fmt.Printf("输入%d: %s\n", i+1, file)
 			}
 			// 然后显示其他选项
 
-			fmt.Println("a: 解压所有压缩文件")
-			fmt.Println("b: 返回上级目录")
-			fmt.Println("i: 安装右键菜单")
-			fmt.Println("u: 卸载右键菜单")
-			fmt.Println("h: 帮助信息")
-			fmt.Println("q: 退出程序")
+			fmt.Println("输入a: 解压所有压缩文件")
+			fmt.Println("输入b: 返回上级目录")
+			fmt.Println("输入i: 安装右键菜单")
+			fmt.Println("输入u: 卸载右键菜单")
+			fmt.Println("输入h: 帮助信息")
+			fmt.Println("输入q: 退出程序")
 
 			fmt.Print("\n请选择 (输入序号或粘贴路径): ")
 			var choice string
@@ -1508,10 +1559,10 @@ func main() {
 			}
 		} else {
 			fmt.Println("\n当前目录为空")
-			fmt.Println("0: 退出程序")
-			fmt.Println("b: 返回上级目录")
-			fmt.Println("h: 帮助信息")
-			fmt.Print("\n请选择或输入路径: ")
+			fmt.Println("输入0: 退出程序")
+			fmt.Println("输入b: 返回上级目录")
+			fmt.Println("输入h: 帮助信息")
+			fmt.Print("\n请输入选择项或输入路径: ")
 			var choice string
 			fmt.Scanln(&choice)
 

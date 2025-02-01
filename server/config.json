@@ -1,0 +1,11 @@
+{
+    "port": 8080,
+    "download_dir": "downloads",
+    "update_info": {
+        "version": "v0.1.5",
+        "download_url": "http://localhost:8080/downloads/7zrpw_v0.1.5.exe",
+        "release_note": "1. 增加密码破解时间统计\n2. 增加自动更新功能\n3. 优化密码破解速度\n4. 修复已知问题",
+        "md5": "",
+        "force_update": false
+    }
+}
