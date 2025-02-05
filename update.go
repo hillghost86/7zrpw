@@ -34,7 +34,7 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 	fmt.Printf("当前版本: %s\n", m.CurrentVersion)
 
 	// 从服务器获取版本信息
-	resp, err := http.Get("http://127.0.0.1:8080/api/v1/version")
+	resp, err := http.Get("https://down.pp.ci/api/v1/version")
 	if err != nil {
 		return fmt.Errorf("无法连接到更新服务器，请稍后重试")
 	}
@@ -101,7 +101,7 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 	}
 
 	// 询问用户是否更新
-	fmt.Print("\n是否立即更新? (y/n) [Y]: ")
+	fmt.Print("\n回车键立即更新? (y/n) [Y]: ")
 	reader := bufio.NewReader(os.Stdin)
 	answer, err := reader.ReadString('\n')
 	if err != nil {
@@ -246,6 +246,9 @@ if exist "%s" del "%s" >nul
 
 echo Update completed!
 start "" "%s"
+
+:: del bat
+(goto) 2>nul & del "%%~f0"
 exit
 `, filepath.Base(exePath), filepath.Base(exePath),
 		exePath, exePath,

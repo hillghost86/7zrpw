@@ -3,25 +3,26 @@
         "FileVersion": {
             "Major": 0,
             "Minor": 1,
-            "Patch": 7,
+            "Patch": 5,
             "Build": 0
         },
         "ProductVersion": {
             "Major": 0,
             "Minor": 1,
-            "Patch": 7,
+            "Patch": 5,
             "Build": 0
         }
     },
     "StringFileInfo": {
-        "CompanyName": "panwenbin",
+        "CompanyName": "hillghost86",
         "FileDescription": "7zrpw 解压助手",
-        "FileVersion": "v0.1.7",
+        "FileVersion": "v0.1.5",
         "InternalName": "7zrpw",
-        "LegalCopyright": "© 2024 panwenbin. All rights reserved.",
+        "LegalCopyright": "© 2024 hillghost86. All rights reserved.",
         "OriginalFilename": "7zrpw.exe",
         "ProductName": "7zrpw 解压助手",
-        "ProductVersion": "v0.1.7"
+
+        "ProductVersion": "v0.1.5"
     },
     "IconPath": "icon.ico"
 } 

@@ -45,5 +45,7 @@ Desktop.ini
 
 # 服务端
 #/server/
+/server/build_server_all.bat
+/server/7zrpw_server
 
 

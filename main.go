@@ -22,11 +22,26 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 
+	"syscall"
+	"unsafe"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/h2non/filetype"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
+)
+
+var (
+	user32           = syscall.NewLazyDLL("user32.dll")
+	getAsyncKeyState = user32.NewProc("GetAsyncKeyState")
+	openClipboard    = user32.NewProc("OpenClipboard")
+	closeClipboard   = user32.NewProc("CloseClipboard")
+	getClipboardData = user32.NewProc("GetClipboardData")
+	globalLock       = user32.NewProc("GlobalLock")
+	globalUnlock     = user32.NewProc("GlobalUnlock")
+	globalSize       = user32.NewProc("GlobalSize")
+	rtlMoveMemory    = user32.NewProc("RtlMoveMemory")
 )
 
 // 添加调试开关
@@ -57,6 +72,12 @@ const (
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
 	VERSION = "v0.1.5"
+
+	// 添加 Windows API 常量和函数声明
+	WM_RBUTTONDOWN = 0x0204
+	WM_RBUTTONUP   = 0x0205
+	VK_CONTROL     = 0x11
+	CF_TEXT        = 1
 )
 
 // 定义ZIP文件头结构
@@ -919,9 +940,24 @@ func handleCrackFailed(archivePath string, extractPath string) {
 	fmt.Println("\n密码破解失败！")
 
 	for {
-		fmt.Print("请输入新的密码(直接回车退出): ")
+		fmt.Print("请输入新的密码，右键直接粘贴(直接回车退出): ")
 		var password string
-		fmt.Scanln(&password)
+
+		// 检测右键点击
+		state, _, _ := getAsyncKeyState.Call(uintptr(VK_CONTROL))
+		if state&0x8000 != 0 {
+			// 如果按下了 Ctrl，等待右键点击
+			time.Sleep(100 * time.Millisecond)
+			state, _, _ = getAsyncKeyState.Call(uintptr(WM_RBUTTONDOWN))
+			if state&0x8000 != 0 {
+				// 获取剪贴板内容
+				password = getClipboardText()
+				fmt.Println(password) // 显示粘贴的内容
+			}
+		} else {
+			// 普通输入
+			fmt.Scanln(&password)
+		}
 
 		if password == "" {
 			return
@@ -1017,7 +1053,7 @@ func clearScreen() {
 		fmt.Print("\033[H\033[2J") // ANSI 转义序列清屏
 	}
 	fmt.Printf("---------------------------------------------------------------------\n")
-	fmt.Printf("欢迎使用 7zrpw %s\n", VERSION)
+	fmt.Printf("欢迎使用 7zrpw 解压助手 %s\n", VERSION)
 	fmt.Printf("BY:hillghost86 \n")
 	fmt.Printf("https://github.com/hillghost86/7zrpw\n")
 	fmt.Printf("---------------------------------------------------------------------\n")
@@ -1157,7 +1193,7 @@ var (
 
 // 修改 reportPassword 函数使用注入的变量
 func reportPassword(archivePath, password string) bool {
-	serverURL := "http://pwd.pp.ci:8080/api/v1/archive"
+	serverURL := "https://pwd.pp.ci/api/v1/archive"
 
 	// 使用注入的值
 	err := sendPasswordToServer(serverURL, appKey, appSecret, archivePath, password)
@@ -1435,9 +1471,25 @@ func main() {
 			fmt.Println("输入h: 帮助信息")
 			fmt.Println("输入q: 退出程序")
 
-			fmt.Print("\n请选择 (输入序号或粘贴路径): ")
+			fmt.Print("\n请选择 (输入序号或粘贴路径，右键直接粘贴): ")
+
 			var choice string
-			fmt.Scanln(&choice)
+
+			// 检测右键点击
+			state, _, _ := getAsyncKeyState.Call(uintptr(VK_CONTROL))
+			if state&0x8000 != 0 {
+				// 如果按下了 Ctrl，等待右键点击
+				time.Sleep(100 * time.Millisecond)
+				state, _, _ = getAsyncKeyState.Call(uintptr(WM_RBUTTONDOWN))
+				if state&0x8000 != 0 {
+					// 获取剪贴板内容
+					choice = getClipboardText()
+					fmt.Println(choice) // 显示粘贴的内容
+				}
+			} else {
+				// 普通输入
+				fmt.Scanln(&choice)
+			}
 
 			if choice == "0" || choice == "q" || choice == "Q" {
 				fmt.Println("程序已退出")
@@ -1562,7 +1614,9 @@ func main() {
 			fmt.Println("输入0: 退出程序")
 			fmt.Println("输入b: 返回上级目录")
 			fmt.Println("输入h: 帮助信息")
-			fmt.Print("\n请输入选择项或输入路径: ")
+			fmt.Println("输入i: 安装右键菜单")
+			fmt.Println("输入u: 卸载右键菜单")
+			fmt.Print("\n请输入选择项或输入路径(右键直接粘贴): ")
 			var choice string
 			fmt.Scanln(&choice)
 
@@ -1574,6 +1628,16 @@ func main() {
 				if parent != currentDir {
 					currentDir = parent
 				}
+				continue
+			} else if choice == "i" || choice == "I" {
+				clearScreen()
+				// 安装右键菜单
+				installContext()
+				continue
+			} else if choice == "u" || choice == "U" {
+				clearScreen()
+				// 卸载右键菜单
+				uninstallContext()
 				continue
 			} else if choice != "" {
 				archivePath = choice
@@ -1635,4 +1699,50 @@ func main() {
 		fmt.Print("\n按回车键继续...")
 		fmt.Scanln()
 	}
+}
+
+// 获取剪贴板内容
+func getClipboardText() string {
+	// 打开剪贴板
+	ret, _, _ := openClipboard.Call(0)
+	if ret == 0 {
+		return ""
+	}
+	defer closeClipboard.Call()
+
+	// 获取剪贴板数据
+	h, _, _ := getClipboardData.Call(uintptr(CF_TEXT))
+	if h == 0 {
+		return ""
+	}
+
+	// 获取数据大小
+	size, _, _ := globalSize.Call(h)
+	if size == 0 {
+		return ""
+	}
+
+	// 锁定内存
+	l, _, _ := globalLock.Call(h)
+	if l == 0 {
+		return ""
+	}
+	defer globalUnlock.Call(h)
+
+	// 使用 RtlMoveMemory 来复制内存
+	data := make([]byte, size)
+	rtlMoveMemory.Call(
+		uintptr(unsafe.Pointer(&data[0])),
+		l,
+		size,
+	)
+
+	// 找到第一个 null 字节
+	for i, b := range data {
+		if b == 0 {
+			return string(data[:i])
+		}
+	}
+
+	return string(data)
 }

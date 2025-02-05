@@ -31,8 +31,8 @@ type ServerConfig struct {
 
 var (
 	config    ServerConfig
-	serverDir string        // 服务器目录
-	debugMode bool   = true // 添加调试模式变量，默认开启
+	serverDir string         // 服务器目录
+	debugMode bool   = false // 添加调试模式变量，默认开启
 )
 
 func init() {

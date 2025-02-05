@@ -1,10 +1,19 @@
 @echo off
 chcp 65001 >nul
 
+:: 清理旧的资源文件
+echo 清理旧的资源文件...
+del /f /q resource_windows_386.syso >nul 2>&1
+del /f /q resource_windows_amd64.syso >nul 2>&1
+del /f /q resource_windows_arm.syso >nul 2>&1
+del /f /q resource_windows_arm64.syso >nul 2>&1
+
+
+:: 生成新的版本信息
 echo 生成版本信息...
 goversioninfo -platform-specific=true
 if errorlevel 1 (
-    echo 生成版本信息失败
+    echo 版本信息生成失败
     exit /b 1
 )
 
@@ -24,4 +33,10 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo 完成！ 
+echo 编译完成，开始复制文件到服务端...
+
+:: 复制文件到服务端 覆盖旧文件
+copy /Y 7zrpw.exe .\server\downloads\7zrpw.exe
+copy /Y 7zrpw.exe .\server\downloads\7zrpw_v0.1.5.exe
+
+echo 复制完成！
