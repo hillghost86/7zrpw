@@ -47,7 +47,7 @@ var (
 )
 
 // 添加调试开关
-var debugMode bool = true
+var debugMode bool = false
 
 //go:embed resources/7z.exe
 var sevenZipExe []byte
