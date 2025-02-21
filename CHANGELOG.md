@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.5.4] - 2025-02-20
+
+### 新增
+- 新增异步更新
+
+### 优化
+- 优化了程序的加载速度
+- 优化了密码文件的读取以及数量统计
+- 优化了更新提示
+
+此版本感谢[@ShuiJu](https://github.com/ShuiJu )的贡献
 
 
 ## [v0.1.5] - 2025-01-31

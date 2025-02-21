@@ -4,25 +4,25 @@
             "Major": 0,
             "Minor": 1,
             "Patch": 5,
-            "Build": 0
+            "Build": 4
         },
         "ProductVersion": {
             "Major": 0,
             "Minor": 1,
             "Patch": 5,
-            "Build": 0
+            "Build": 4
         }
     },
     "StringFileInfo": {
         "CompanyName": "hillghost86",
         "FileDescription": "7zrpw 解压助手",
-        "FileVersion": "v0.1.5",
+        "FileVersion": "v0.1.5.3",
         "InternalName": "7zrpw",
-        "LegalCopyright": "© 2024 hillghost86. All rights reserved.",
+        "LegalCopyright": "© 2025 hillghost86. All rights reserved.",
         "OriginalFilename": "7zrpw.exe",
         "ProductName": "7zrpw 解压助手",
 
-        "ProductVersion": "v0.1.5"
+        "ProductVersion": "v0.1.5.3"
     },
     "IconPath": "icon.ico"
 } 

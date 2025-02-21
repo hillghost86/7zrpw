@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +28,13 @@ func NewUpdateManager(version string) (*UpdateManager, error) {
 	return manager, nil
 }
 
+// 添加全局变量存储更新信息
+var (
+	updateResultChan = make(chan string, 1)
+	updateManager    *UpdateManager
+	updateInfo       VersionInfo
+)
+
 // CheckUpdate 检查更新
 func (m *UpdateManager) CheckUpdate(force bool) error {
 	fmt.Printf("当前版本: %s\n", m.CurrentVersion)
@@ -45,25 +51,24 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 		return fmt.Errorf("更新服务器暂时不可用 (HTTP %d)", resp.StatusCode)
 	}
 
-	// 读取响应内容
+	// 读取和解析版本信息
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("读取服务器响应失败")
 	}
 
-	// 解析版本信息
 	var info VersionInfo
 	if err := json.Unmarshal(body, &info); err != nil {
 		return fmt.Errorf("解析版本信息失败")
 	}
 
-	// 验证服务器返回的数据
 	if info.Version == "" || info.DownloadURL == "" {
 		return fmt.Errorf("服务器返回的版本信息不完整")
 	}
 
-	// 判断是否需要更新
-	hasNewVersion := info.Version != m.CurrentVersion
+	//使用compareVersions函数判断版本是否需要更新
+	compareResult := m.compareVersions(info.Version)
+	hasNewVersion := compareResult == 1
 	needUpdate := hasNewVersion || force
 
 	// 如果版本相同且是服务器强制更新，则忽略
@@ -72,27 +77,44 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 	}
 
 	if !needUpdate {
-		fmt.Println("当前已是最新版本")
+		// 将"当前已是最新版本"消息通过通道传递
+		select {
+		case updateResultChan <- "当前已是最新版本":
+		default:
+		}
 		return nil
 	}
 
-	// 显示更新信息
 	if hasNewVersion {
-		fmt.Printf("\n发现新版本: %s\n", info.Version)
+		// 保存更新信息到全局变量
+		updateInfo = info
+		updateManager = m // 确保 updateManager 被正确设置
+
+		// 构建更新消息
+		var updateMsg strings.Builder
+		updateMsg.WriteString(fmt.Sprintf("\n发现新版本: %s\n", info.Version))
 		if info.MD5 != "" {
-			fmt.Printf("新版本MD5: %s\n", info.MD5)
+			updateMsg.WriteString(fmt.Sprintf("新版本MD5: %s\n", info.MD5))
 		}
-	} else if force {
-		fmt.Printf("\n准备重新安装当前版本: %s\n", info.Version)
-	}
+		if info.ReleaseNote != "" {
+			updateMsg.WriteString(fmt.Sprintf("更新说明:\n%s\n", info.ReleaseNote))
+		}
+		updateMsg.WriteString(fmt.Sprintf("手动下载地址: %s", info.DownloadURL))
 
-	// 显示更新说明
-	if info.ReleaseNote != "" {
-		fmt.Printf("更新说明: \n%s\n", info.ReleaseNote)
-	}
+		// 将消息发送到通道
+		updateResultChan <- updateMsg.String()
 
-	// 显示手动下载地址
-	fmt.Printf("手动下载地址: %s\n", info.DownloadURL)
+		// select {
+		// case updateResultChan <- updateMsg.String():
+		// 	if debugMode {
+		// 		fmt.Println("更新消息已发送到通道")
+		// 	}
+		// default:
+		// 	if debugMode {
+		// 		fmt.Println("通道已满，无法发送更新消息")
+		// 	}
+		// }
+	}
 
 	// 执行更新
 	if info.ForceUpdate && hasNewVersion {
@@ -100,21 +122,6 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 		return m.doUpdate(info)
 	}
 
-	// 询问用户是否更新
-	fmt.Print("\n回车键立即更新? (y/n) [Y]: ")
-	reader := bufio.NewReader(os.Stdin)
-	answer, err := reader.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("读取用户输入失败")
-	}
-
-	answer = strings.TrimSpace(strings.ToLower(answer))
-	// 如果用户直接回车或输入 y/yes，则执行更新
-	if answer == "" || answer == "y" || answer == "yes" {
-		return m.doUpdate(info)
-	}
-
-	// 用户选择不更新，直接返回
 	return nil
 }
 
@@ -320,4 +327,40 @@ func calculateMD5(filePath string) (string, error) {
 	}
 
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// 版本比较函数
+// 返回值：
+// 0: 版本相同
+// 1: 有新版本
+// -1: 当前版本更新
+func (um *UpdateManager) compareVersions(newVersion string) int {
+	// 移除版本号前缀的'v'
+	current := strings.TrimPrefix(um.CurrentVersion, "v")
+
+	new := strings.TrimPrefix(newVersion, "v")
+
+	// 分割版本号
+	currentParts := strings.Split(current, ".")
+	newParts := strings.Split(new, ".")
+
+	// 比较每个部分
+	for i := 0; i < len(currentParts) && i < len(newParts); i++ {
+		if currentParts[i] < newParts[i] {
+			return 1 // 有新版本
+		}
+		if currentParts[i] > newParts[i] {
+			return -1 // 当前版本更新
+		}
+	}
+
+	// 如果前面都相同，比较版本号长度
+	if len(newParts) > len(currentParts) {
+		return 1
+	}
+	if len(newParts) < len(currentParts) {
+		return -1
+	}
+
+	return 0 // 版本相同
 }

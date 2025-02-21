@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"unsafe"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/h2non/filetype"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -45,7 +47,7 @@ var (
 )
 
 // 添加调试开关
-var debugMode bool = false
+var debugMode bool = true
 
 //go:embed resources/7z.exe
 var sevenZipExe []byte
@@ -71,7 +73,7 @@ const (
 	// 7Z格式相关常量
 	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
 
-	VERSION = "v0.1.5"
+	VERSION = "v0.1.5.4"
 
 	// 添加 Windows API 常量和函数声明
 	WM_RBUTTONDOWN = 0x0204
@@ -124,30 +126,41 @@ type VersionInfo struct {
 	ForceUpdate bool   `json:"force_update"` // 确保字段名完全匹配
 }
 
+// 辅助函数：仅在文件不存在时提取文件
+func extractFileIfNotExist(path string, data []byte) error {
+	// 检查文件是否存在
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// 文件不存在时才写入
+		return os.WriteFile(path, data, 0755)
+	}
+	return nil // 文件已存在，不需要操作
+}
+
 // 在 init() 函数中添加配置文件初始化
+// 感谢https://github.com/ShuiJu 的提点，7z.exe和7z.dll需要时才进行释放，预加载user32.dll
+
 func init() {
-	// 确保临时目录存在
 	tempDir := filepath.Join(os.TempDir(), "7zrpw")
-	os.MkdirAll(tempDir, 0755)
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		panic(fmt.Sprintf("无法创建临时目录: %v", err))
+	}
 
-	// 提取7z.exe到临时目录
 	sevenZipPath := filepath.Join(tempDir, "7z.exe")
-	if _, err := os.Stat(sevenZipPath); os.IsNotExist(err) {
-		err = os.WriteFile(sevenZipPath, sevenZipExe, 0755)
-		if err != nil {
-			panic(fmt.Sprintf("无法释放7z.exe: %v", err))
-		}
-	}
-
-	// 提取7z.dll到临时目录
 	dllPath := filepath.Join(tempDir, "7z.dll")
-	if _, err := os.Stat(dllPath); os.IsNotExist(err) {
-		err = os.WriteFile(dllPath, sevenZipDll, 0755)
-		if err != nil {
-			panic(fmt.Sprintf("无法释放7z.dll: %v", err))
-		}
+
+	// 提取必要文件
+	if err := extractFileIfNotExist(sevenZipPath, sevenZipExe); err != nil {
+		panic(fmt.Sprintf("无法释放7z.exe: %v", err))
 	}
 
+	if err := extractFileIfNotExist(dllPath, sevenZipDll); err != nil {
+		panic(fmt.Sprintf("无法释放7z.dll: %v", err))
+	}
+
+	// 预加载 DLL
+	if err := user32.Load(); err != nil {
+		panic(fmt.Sprintf("无法加载user32.dll: %v", err))
+	}
 }
 
 // 获取7z.exe路径
@@ -332,6 +345,7 @@ func testPassword(archivePath, password string) bool {
 	go func() {
 		output, _ := cmd.CombinedOutput()
 		outputStr := string(output)
+		//fmt.Printf("测试密码输出: %s\n", outputStr)
 
 		// 如果输出包含以下信息，说明密码正确
 		if strings.Contains(outputStr, "Everything is Ok") {
@@ -341,8 +355,8 @@ func testPassword(archivePath, password string) bool {
 
 		// 如果输出包含以下错误信息，说明密码错误
 		if strings.Contains(outputStr, "Cannot open encrypted archive") ||
+			strings.Contains(outputStr, "Data Error in encrypted file") ||
 			strings.Contains(outputStr, "ERROR:") ||
-			strings.Contains(outputStr, "Data Error in encrypted") ||
 			strings.Contains(outputStr, "Can't open as archive") ||
 			strings.Contains(outputStr, "ERROR: Wrong password") ||
 			strings.Contains(outputStr, "Wrong password") ||
@@ -425,6 +439,32 @@ func crackArchive(archivePath string, passwords []string) (string, error) {
 	speed := float64(testedCount) / elapsed.Seconds()
 	fmt.Printf("\n破解用时: %s (平均 %.1f 密码/秒)\n", formatDuration(elapsed), speed)
 	return "", fmt.Errorf("未找到正确密码")
+}
+
+// 函数说明：处理解压文件
+// 参数：
+// archivePath: 压缩文件路径
+// extractPath: 解压路径
+// password: 密码
+// isFound: 是否找到密码
+func handleExtract(archivePath string, extractPath string, password string, isFound bool) {
+	if isFound {
+		if password == "" {
+			fmt.Println("\n文件无密码")
+		} else {
+			fmt.Printf("\n找到正确密码: [%s]\n", password)
+		}
+	} else {
+		fmt.Printf("\n密码正确: [%s]\n", password)
+	}
+
+	fmt.Println("正在解压文件...")
+	if err := extractArchive(archivePath, password, extractPath); err != nil {
+		fmt.Printf("解压失败: %v\n", err)
+	} else {
+		fmt.Printf("\n解压成功！\n")
+		fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
+	}
 }
 
 // 函数说明：获取第一个分卷的路径
@@ -538,6 +578,7 @@ func extractArchive(archivePath string, password string, extractPath string) err
 	// 显示总用时
 	totalTime := time.Since(startTime)
 	fmt.Printf("\n解压完成，总用时: %s\n", formatDuration(totalTime))
+	reportPassword(archivePath, password)
 
 	if err != nil {
 		return fmt.Errorf("解压失败: %v", err)
@@ -649,42 +690,106 @@ func findCompressFiles(dir string) []string {
 	return files
 }
 
+// 定义文件大小阈值(10MB)
+const FILE_SIZE_THRESHOLD = 10 * 1024 * 1024
+
 // 函数说明：读取密码文件
 // 参数：
 // path: 密码文件路径
-// 返回：密码通道，密码数量，错误信息
-func readPasswordFile(path string) (<-chan string, int, error) {
-	passwordChan := make(chan string)
+// 返回：密码列表，密码数量，错误信息
+func readPasswordFile(path string) ([]string, int, error) {
+	// 获取文件信息和大小
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("获取文件信息失败: %v", err)
+	}
+
+	fileSize := fileInfo.Size()
+
+	if fileSize <= FILE_SIZE_THRESHOLD {
+		// 小文件使用简单方式
+		return readSmallFile(path)
+	} else {
+		// 大文件使用channel方式
+		return readLargeFile(path)
+	}
+}
+
+// 读取小文件
+func readSmallFile(path string) ([]string, int, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, 0, err
 	}
+	defer file.Close()
 
-	// 先统计有效密码数量
-	var count int
+	var passwords []string
 	scanner := bufio.NewScanner(file)
+
+	// 优化: 设置更大的buffer以提高读取性能
+	const maxCapacity = 512 * 1024 // 512KB
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
+
 	for scanner.Scan() {
 		if password := strings.TrimSpace(scanner.Text()); password != "" {
-			count++
+			passwords = append(passwords, password)
 		}
 	}
 
-	// 重置文件指针到开始位置
-	file.Seek(0, 0)
+	if err := scanner.Err(); err != nil {
+		return nil, 0, fmt.Errorf("读取文件失败: %v", err)
+	}
 
-	// 启动goroutine读取密码
+	return passwords, len(passwords), nil
+}
+
+// 读取大文件
+func readLargeFile(path string) ([]string, int, error) {
+	// 创建结果channel
+	resultChan := make(chan []string)
+	errorChan := make(chan error)
+
+	// 启动goroutine读取文件
 	go func() {
+		file, err := os.Open(path)
+		if err != nil {
+			errorChan <- err
+			return
+		}
 		defer file.Close()
+
+		var passwords []string
 		scanner := bufio.NewScanner(file)
+
+		// 优化: 设置更大的buffer以提高读取性能
+		const maxCapacity = 512 * 1024 // 512KB
+		buf := make([]byte, maxCapacity)
+		scanner.Buffer(buf, maxCapacity)
+
 		for scanner.Scan() {
 			if password := strings.TrimSpace(scanner.Text()); password != "" {
-				passwordChan <- password
+				passwords = append(passwords, password)
 			}
 		}
-		close(passwordChan)
+
+		if err := scanner.Err(); err != nil {
+			errorChan <- fmt.Errorf("读取文件失败: %v", err)
+			return
+		}
+
+		resultChan <- passwords
 	}()
 
-	return passwordChan, count, nil
+	// 等待结果
+	select {
+	case passwords := <-resultChan:
+		return passwords, len(passwords), nil
+	case err := <-errorChan:
+		return nil, 0, err
+	case <-time.After(30 * time.Second): // 添加超时处理
+		return nil, 0, fmt.Errorf("读取文件超时")
+	}
 }
 
 // 函数说明：获取所有密码
@@ -699,6 +804,7 @@ func getAllPasswords() ([]string, string, error) {
 		filepath.Join(currentDir, "passwd.txt"), // 当前目录
 		filepath.Join(exeDir, "passwd.txt"),     // 程序目录
 	}
+
 	// 对路径进行去重
 	var uniquePaths []string
 	seen := make(map[string]bool)
@@ -721,12 +827,12 @@ func getAllPasswords() ([]string, string, error) {
 
 	// 读取所有密码文件
 	for _, path := range uniquePaths {
-		if passwordChan, count, err := readPasswordFile(path); err == nil {
+		if passwords, count, err := readPasswordFile(path); err == nil {
 			if count > 0 {
 				usedPaths = append(usedPaths, path)
 				filePasswords[path] = count
-				// 从 channel 中读取密码
-				for password := range passwordChan {
+				// 添加密码到map中去重
+				for _, password := range passwords {
 					passwordMap[password] = true
 				}
 			}
@@ -905,37 +1011,10 @@ func savePasswordToFile(password string) error {
 	return nil
 }
 
-// 函数说明：处理解压文件
+// 处理密码破解失败的情况
 // 参数：
 // archivePath: 压缩文件路径
 // extractPath: 解压路径
-// password: 密码
-// isFound: 是否找到密码
-func handleExtract(archivePath string, extractPath string, password string, isFound bool) {
-	if isFound {
-		if password == "" {
-			fmt.Println("\n文件无密码")
-		} else {
-			fmt.Printf("\n找到正确密码: [%s]\n", password)
-		}
-	} else {
-		fmt.Printf("\n密码正确: [%s]\n", password)
-	}
-
-	fmt.Println("正在解压文件...")
-	if err := extractArchive(archivePath, password, extractPath); err != nil {
-		fmt.Printf("解压失败: %v\n", err)
-	} else {
-		fmt.Printf("\n解压成功！\n")
-		if password != "" {
-			reportPassword(archivePath, password)
-		}
-		fmt.Printf("文件已保存到: %s\n", formatPath(extractPath))
-	}
-}
-
-// 处理密码破解失败的情况
-
 func handleCrackFailed(archivePath string, extractPath string) {
 	fmt.Println("\n密码破解失败！")
 
@@ -964,13 +1043,11 @@ func handleCrackFailed(archivePath string, extractPath string) {
 		}
 
 		if testPassword(archivePath, password) {
-			handleExtract(archivePath, extractPath, password, false)
+			handleExtract(archivePath, extractPath, password, true)
 			//保存密码到passwd.txt文件
 			if err := savePasswordToFile(password); err != nil {
 				fmt.Printf("保存密码失败: %v\n", err)
 			} else {
-				//reportPassword发送密码到服务器
-				reportPassword(archivePath, password)
 				fmt.Printf("新密码【%s】已保存到passwd.txt文件。 \n", password)
 			}
 			return
@@ -1057,6 +1134,9 @@ func clearScreen() {
 	fmt.Printf("BY:hillghost86 \n")
 	fmt.Printf("https://github.com/hillghost86/7zrpw\n")
 	fmt.Printf("---------------------------------------------------------------------\n")
+	if debugMode {
+		fmt.Println("debugMode: ", debugMode)
+	}
 }
 
 // 函数说明：安装右键菜单
@@ -1186,31 +1266,22 @@ func uninstallContext() error {
 }
 
 var (
-	// 这些变量将在构建时注入
+	// 构建时注入
 	appKey    = "default" // 默认值，会被构建时的值覆盖
 	appSecret = "default" // 默认值，会被构建时的值覆盖
+	serverURL = "default" // 默认值，会被构建时的值覆盖
 )
 
-// 修改 reportPassword 函数使用注入的变量
+// 参数：
+// archivePath: 压缩文件路径
+// password: 密码
+// 返回：是否成功
 func reportPassword(archivePath, password string) bool {
-	serverURL := "https://pwd.pp.ci/api/v1/archive"
-
-	// 使用注入的值
-	err := sendPasswordToServer(serverURL, appKey, appSecret, archivePath, password)
-	if err != nil {
-		if debugMode {
-			fmt.Printf("发送密码到服务器失败: %v\n", err)
-		}
-		return false
-	}
+	sendPasswordToServer(serverURL, appKey, appSecret, archivePath, password)
 	return true
 }
 
-// 添加新的函数用于发送密码到服务器
 func sendPasswordToServer(serverURL, appKey, appSecret, filePath, password string) error {
-	if debugMode {
-		fmt.Printf("开始发送密码到服务器...\n")
-	}
 
 	// 打开文件
 	file, err := os.Open(filePath)
@@ -1231,26 +1302,18 @@ func sendPasswordToServer(serverURL, appKey, appSecret, filePath, password strin
 		return err
 	}
 
-	if debugMode {
-		fmt.Printf("文件大小: %d 字节\n", fileInfo.Size())
-	}
+	// 获取文件类型
+	fileType := getFileTypeDesc(getFileType(filePath))
 
 	// 计算前1024字节的MD5
 	hash := md5.New()
 	buffer := make([]byte, 1024)
 	n, err := file.Read(buffer)
 	if err != nil && err != io.EOF {
-		if debugMode {
-			return fmt.Errorf("计算1024字节MD5失败: %v", err)
-		}
 		return err
 	}
 	hash.Write(buffer[:n])
 	md51024 := hex.EncodeToString(hash.Sum(nil))
-
-	if debugMode {
-		fmt.Printf("MD5(1024): %s\n", md51024)
-	}
 
 	// 重置文件指针
 	file.Seek(0, 0)
@@ -1260,80 +1323,42 @@ func sendPasswordToServer(serverURL, appKey, appSecret, filePath, password strin
 	buffer = make([]byte, 1024*1024)
 	n, err = file.Read(buffer)
 	if err != nil && err != io.EOF {
-		if debugMode {
-			return fmt.Errorf("计算1MB MD5失败: %v", err)
-		}
 		return err
 	}
 	hash.Write(buffer[:n])
 	md51mb := hex.EncodeToString(hash.Sum(nil))
 
-	if debugMode {
-		fmt.Printf("MD5(1MB): %s\n", md51mb)
-	}
-
+	uuid := loadOrGenerateUUID()
 	// 准备请求参数
 	params := map[string]interface{}{
-		"name_raw": filepath.Base(filePath),
-		"size":     fileInfo.Size(),
-		"md5_1024": md51024,
-		"md5_1mb":  md51mb,
-		"password": password,
+		"name_raw":  filepath.Base(filePath),
+		"size":      fileInfo.Size(),
+		"md5_1024":  md51024,
+		"md5_1mb":   md51mb,
+		"password":  password,
+		"uuid":      uuid,
+		"file_type": fileType,
 	}
-
 	// 生成 JWT
 	token, err := generateJWT(appKey, appSecret, params)
 	if err != nil {
-		if debugMode {
-			return fmt.Errorf("生成JWT失败: %v", err)
-		}
 		return err
 	}
-
-	if debugMode {
-		fmt.Printf("JWT生成成功\n")
-	}
-
 	// 创建请求
 	req, err := http.NewRequest("POST", serverURL, nil)
 	if err != nil {
-		if debugMode {
-			return fmt.Errorf("创建请求失败: %v", err)
-		}
 		return err
 	}
-
 	// 设置请求头
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-
 	// 发送请求
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		if debugMode {
-			return fmt.Errorf("发送请求失败: %v", err)
-		}
 		return err
 	}
 	defer resp.Body.Close()
-
-	if debugMode {
-		fmt.Printf("服务器响应状态码: %d\n", resp.StatusCode)
-	}
-
-	// 检查响应状态码
-	if resp.StatusCode != http.StatusOK {
-		if debugMode {
-			return fmt.Errorf("服务器返回错误 (状态码: %d)", resp.StatusCode)
-		}
-		return fmt.Errorf("status code: %d", resp.StatusCode)
-	}
-
-	if debugMode {
-		fmt.Printf("密码发送成功\n")
-	}
-
 	return nil
 }
 
@@ -1348,38 +1373,94 @@ func generateJWT(appKey, appSecret string, params map[string]interface{}) (strin
 	return token.SignedString([]byte(appSecret))
 }
 
-// CheckUpdate 检查更新
-func CheckUpdate(force bool) error {
-	// 创建更新管理器
-	manager, err := NewUpdateManager(VERSION)
-	if err != nil {
-		return fmt.Errorf("创建更新管理器失败: %v", err)
-	}
+// 函数说明：异步检查更新
+// 返回：更新管理器
+func asyncCheckUpdate() {
+	go func() {
+		updateManager, err := NewUpdateManager(VERSION)
+		if err != nil {
+			if debugMode {
+				fmt.Printf("初始化更新管理器失败: %v\n", err)
+			}
+			return
+		}
 
-	// 执行更新检查
-	if err := manager.CheckUpdate(force); err != nil {
-		return err
-	}
+		if err := updateManager.CheckUpdate(false); err != nil {
+			if debugMode {
+				fmt.Printf("检查更新失败: %v\n", err)
+			}
+		}
+		// 移除默认消息，使用 CheckUpdate 中的详细更新信息
+	}()
+}
 
-	// 如果用户选择不更新，直接返回
-	return nil
+// 函数说明：处理更新检查和程序退出
+// handleUpdateAndExit 处理更新检查和程序退出
+// updateResultChan: 更新消息通道
+// updateManager: 更新管理器
+
+func handleUpdateAndExit() {
+	reader := bufio.NewReader(os.Stdin)
+
+	// 检查是否有更新消息
+	select {
+	case updateMsg := <-updateResultChan:
+		// 如果不是新版本消息，直接返回
+		if !strings.Contains(updateMsg, "发现新版本") {
+			return
+		}
+
+		// 显示更新信息并询问是否更新
+		fmt.Println(updateMsg)
+		fmt.Print("\n回车键立即更新? (y/n) [Y]: ")
+
+		answer, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Printf("读取用户输入失败: %v\n", err)
+			return
+		}
+
+		// 如果用户选择不更新，直接返回
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "" && answer != "y" && answer != "yes" {
+			return
+		}
+
+		// 检查更新管理器
+		if updateManager == nil {
+			fmt.Println("更新管理器未初始化")
+			fmt.Print("\n按回车键退出...")
+			reader.ReadString('\n')
+			return
+		}
+
+		// 执行更新
+		if debugMode {
+			fmt.Printf("开始执行更新，版本信息: %+v\n", updateInfo)
+		}
+
+		if err := updateManager.doUpdate(updateInfo); err != nil {
+			fmt.Printf("更新失败: %v\n", err)
+			fmt.Print("\n按回车键退出...")
+			reader.ReadString('\n')
+		}
+		// 更新成功会自动退出
+		return
+
+	default:
+		fmt.Print("\n按回车键退出...")
+		reader.ReadString('\n')
+	}
 }
 
 // 主函数
 func main() {
-	// 创建更新管理器
-	updateManager, err := NewUpdateManager(VERSION)
-	if err != nil {
-		fmt.Printf("初始化更新管理器失败: %v\n", err)
-		return
-	}
+	// 启动异步更新检查
+	asyncCheckUpdate()
 
-	// 检查更新
-	if err := updateManager.CheckUpdate(false); err != nil {
-		fmt.Printf("检查更新失败: %v\n", err)
-	}
-
+	// 立即显示主界面
 	clearScreen()
+
 	//查询7zrpw.exe所在目录是否有passwd.txt文件，如果没有则创建
 	exePath, err := os.Executable()
 	if err != nil {
@@ -1437,10 +1518,13 @@ func main() {
 				// 处理文件
 				if getFileType(absPath) != -1 {
 					processArchive(absPath, passwords, passwordsInfo)
+					// 处理更新和退出
+					handleUpdateAndExit()
 				} else {
 					fmt.Println("不支持的文件格式")
 				}
-				fmt.Print("\n按回车键退出...")
+				//右键菜单模式下，按回车键退出
+				fmt.Print("\n按回车键退出......")
 				fmt.Scanln()
 				return
 			}
@@ -1472,7 +1556,7 @@ func main() {
 			fmt.Println("输入q: 退出程序")
 
 			fmt.Print("\n请选择 (输入序号或粘贴路径，右键直接粘贴): ")
-
+			// 检查是否有更新消息
 			var choice string
 
 			// 检测右键点击
@@ -1537,6 +1621,8 @@ func main() {
 					fmt.Printf("\n[%d/%d] 处理文件: %s\n", i+1, len(compressFiles), filepath.Base(file))
 					processArchive(file, passwords, passwordsInfo)
 				}
+				// 处理更新和退出
+				handleUpdateAndExit()
 
 				fmt.Print("\n按回车键继续...")
 				fmt.Scanln()
@@ -1695,6 +1781,8 @@ func main() {
 		fmt.Println("开始尝试破解...")
 
 		processArchive(archivePath, passwords, passwordsInfo)
+		// 处理更新和退出
+		handleUpdateAndExit()
 
 		fmt.Print("\n按回车键继续...")
 		fmt.Scanln()
@@ -1745,4 +1833,38 @@ func getClipboardText() string {
 	}
 
 	return string(data)
+}
+
+type ClientConfig struct {
+	UUID string `json:"uuid"`
+}
+
+func loadOrGenerateUUID() string {
+	// 配置文件路径
+	//配置文件放在临时目录里
+	configPath := filepath.Join(os.TempDir(), "7zrpw", "client.json")
+	//如果失败，则放在程序目录里
+	// if _, err := os.Stat(configPath); os.IsNotExist(err) {
+	// 	configPath = filepath.Join(filepath.Dir(os.Args[0]), "client.json")
+	// }
+
+	// 尝试加载现有配置
+	var config ClientConfig
+	data, err := os.ReadFile(configPath)
+	if err == nil {
+		json.Unmarshal(data, &config)
+		if config.UUID != "" {
+			return config.UUID
+		}
+	}
+
+	// 生成新的 UUID
+	config.UUID = uuid.New().String()
+
+	// 保存配置
+	if data, err := json.Marshal(config); err == nil {
+		os.WriteFile(configPath, data, 0644)
+	}
+
+	return config.UUID
 }

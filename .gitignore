@@ -11,7 +11,7 @@
 /test/
 /test*/
 
-#备份文件
+# 备份文件
 *.bak
 
 # 密码文件
@@ -25,13 +25,11 @@ passwd*
 *.swo
 func.md
 
-
 # 依赖目录
 /vendor/
 
 # 调试文件
 debug
-
 
 # Windows
 Thumbs.db
@@ -40,12 +38,15 @@ Desktop.ini
 # macOS
 .DS_Store
 
+# 资源文件
+
+
+# 配置文件
+server/config.json
+
+
 # 其他
 /tools/
-
-# 服务端
-#/server/
-/server/build_server_all.bat
-/server/7zrpw_server
-
-
+/server/
+/build.bat
+/index.html
