@@ -46,6 +46,19 @@ var (
 	rtlMoveMemory    = user32.NewProc("RtlMoveMemory")
 )
 
+// 预编译正则表达式，避免重复编译
+var (
+	re7zPart3      = regexp.MustCompile(`\.7z\.\d{3}$`)
+	re7zPartN      = regexp.MustCompile(`\.7z\.\d+$`)
+	reTarPart      = regexp.MustCompile(`\.tar\.\d{3}$`)
+	reZipPart3     = regexp.MustCompile(`\.zip\.\d{3}$`)
+	reZipPartN     = regexp.MustCompile(`\.zip\.\d+$`)
+	reZ01          = regexp.MustCompile(`\.z\d{2}$`)
+	rePartRar      = regexp.MustCompile(`\.part\d+\.rar$`)
+	reR01          = regexp.MustCompile(`\.r\d{2}$`)
+	rePartPatterns = []*regexp.Regexp{reZipPartN, reZ01, rePartRar, reR01, re7zPartN, reTarPart}
+)
+
 // 添加调试开关
 var debugMode bool = false
 
@@ -55,47 +68,16 @@ var sevenZipExe []byte
 //go:embed resources/7z.dll
 var sevenZipDll []byte
 
-// 定义压缩文件的基本结构
-type ArchiveEntry struct {
-	Name      string
-	CRC32     uint32
-	Size      uint64
-	Encrypted bool
-}
-
 // 定义常量和结构
 const (
-	// ZIP格式相关常量
-	ZIP_LOCAL_HEADER_MAGIC   = 0x04034b50
-	ZIP_CENTRAL_HEADER_MAGIC = 0x02014b50
-	ZIP_END_HEADER_MAGIC     = 0x06054b50
-
-	// 7Z格式相关常量
-	SEVEN_ZIP_MAGIC = "7z\xBC\xAF\x27\x1C"
-
-	VERSION = "v0.1.5.4"
+	VERSION = "v0.1.6.0"
 
 	// 添加 Windows API 常量和函数声明
 	WM_RBUTTONDOWN = 0x0204
 	WM_RBUTTONUP   = 0x0205
 	VK_CONTROL     = 0x11
-	CF_TEXT        = 1
+	CF_TEXT = 1
 )
-
-// 定义ZIP文件头结构
-type ZipHeader struct {
-	Magic       uint32
-	Version     uint16
-	Flags       uint16
-	Method      uint16
-	ModTime     uint16
-	ModDate     uint16
-	CRC32       uint32
-	CompSize    uint32
-	UncompSize  uint32
-	NameLength  uint16
-	ExtraLength uint16
-}
 
 // 支持的文件类型
 const (
@@ -126,21 +108,106 @@ type VersionInfo struct {
 	ForceUpdate bool   `json:"force_update"` // 确保字段名完全匹配
 }
 
-// 辅助函数：仅在文件不存在时提取文件
+// 辅助函数：仅在文件不存在时提取文件（版本子目录保证更新后使用新文件）
 func extractFileIfNotExist(path string, data []byte) error {
-	// 检查文件是否存在
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		// 文件不存在时才写入
 		return os.WriteFile(path, data, 0755)
 	}
-	return nil // 文件已存在，不需要操作
+	return nil
+}
+
+// 获取 7z 临时目录（按版本号分子目录，更新后自动使用新版本 7z.exe/dll）
+func get7zTempDir() string {
+	return filepath.Join(os.TempDir(), "7zrpw", "7zrpw_"+VERSION)
+}
+
+// cleanOld7zVersionDirs 清理旧版本目录，只保留当前版本和上一个版本
+func cleanOld7zVersionDirs() {
+	baseDir := filepath.Join(os.TempDir(), "7zrpw")
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return
+	}
+
+	prefix := "7zrpw_"
+	var versionDirs []struct {
+		name    string
+		version string
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		ver := strings.TrimPrefix(entry.Name(), prefix)
+		versionDirs = append(versionDirs, struct {
+			name    string
+			version string
+		}{entry.Name(), ver})
+	}
+
+	if len(versionDirs) <= 2 {
+		return
+	}
+
+	// 按版本号降序排序（新的在前）
+	sort.Slice(versionDirs, func(i, j int) bool {
+		return compareVersionStrings(versionDirs[i].version, versionDirs[j].version) > 0
+	})
+
+	// 保留前两个（当前和上一个），删除其余
+	for i := 2; i < len(versionDirs); i++ {
+		dirPath := filepath.Join(baseDir, versionDirs[i].name)
+		os.RemoveAll(dirPath)
+	}
+}
+
+// compareVersionStrings 比较版本字符串，返回 1/a>b, 0/a==b, -1/a<b
+func compareVersionStrings(a, b string) int {
+	a = strings.TrimPrefix(a, "v")
+	b = strings.TrimPrefix(b, "v")
+	partsA := strings.Split(a, ".")
+	partsB := strings.Split(b, ".")
+
+	for i := 0; i < len(partsA) && i < len(partsB); i++ {
+		nA, okA := strconv.Atoi(strings.TrimSpace(partsA[i]))
+		nB, okB := strconv.Atoi(strings.TrimSpace(partsB[i]))
+		if okA == nil && okB == nil {
+			if nA > nB {
+				return 1
+			}
+			if nA < nB {
+				return -1
+			}
+		} else {
+			if partsA[i] > partsB[i] {
+				return 1
+			}
+			if partsA[i] < partsB[i] {
+				return -1
+			}
+		}
+	}
+	if len(partsA) > len(partsB) {
+		return 1
+	}
+	if len(partsA) < len(partsB) {
+		return -1
+	}
+	return 0
 }
 
 // 在 init() 函数中添加配置文件初始化
 // 感谢https://github.com/ShuiJu 的提点，7z.exe和7z.dll需要时才进行释放，预加载user32.dll
+// 按版本号创建子目录，更新后新版本使用新目录，无需每次启动覆盖，不影响启动速度
 
 func init() {
-	tempDir := filepath.Join(os.TempDir(), "7zrpw")
+	base7zDir := filepath.Join(os.TempDir(), "7zrpw")
+	if err := os.MkdirAll(base7zDir, 0755); err != nil {
+		panic(fmt.Sprintf("无法创建临时目录: %v", err))
+	}
+
+	tempDir := get7zTempDir()
 	if err := os.MkdirAll(tempDir, 0755); err != nil {
 		panic(fmt.Sprintf("无法创建临时目录: %v", err))
 	}
@@ -148,7 +215,7 @@ func init() {
 	sevenZipPath := filepath.Join(tempDir, "7z.exe")
 	dllPath := filepath.Join(tempDir, "7z.dll")
 
-	// 提取必要文件
+	// 提取必要文件（仅当不存在时，同一版本无需重复写入）
 	if err := extractFileIfNotExist(sevenZipPath, sevenZipExe); err != nil {
 		panic(fmt.Sprintf("无法释放7z.exe: %v", err))
 	}
@@ -156,6 +223,9 @@ func init() {
 	if err := extractFileIfNotExist(dllPath, sevenZipDll); err != nil {
 		panic(fmt.Sprintf("无法释放7z.dll: %v", err))
 	}
+
+	// 清理旧版本目录，只保留当前版本和上一个版本
+	cleanOld7zVersionDirs()
 
 	// 预加载 DLL
 	if err := user32.Load(); err != nil {
@@ -167,7 +237,20 @@ func init() {
 // 说明：获取7z.exe路径
 // 返回：7z.exe路径
 func getSevenZipPath() string {
-	return filepath.Join(os.TempDir(), "7zrpw", "7z.exe")
+	return filepath.Join(get7zTempDir(), "7z.exe")
+}
+
+// format7zPasswordArg 格式化 7z 的密码参数，支持含空格、引号、反斜杠等特殊字符
+func format7zPasswordArg(password string) string {
+	if password == "" {
+		return "-p"
+	}
+	if strings.ContainsAny(password, " \"\\") {
+		escaped := strings.ReplaceAll(password, "\\", "\\\\")
+		escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+		return "-p\"" + escaped + "\""
+	}
+	return "-p" + password
 }
 
 // 函数说明：GBK解码
@@ -198,7 +281,7 @@ func getFileType(path string) int {
 	baseName := strings.ToLower(filepath.Base(path))
 
 	// 检查7z分卷（支持任意序号）
-	if matched, _ := regexp.MatchString(`\.7z\.\d{3}$`, baseName); matched {
+	if re7zPart3.MatchString(baseName) {
 		return TYPE_7Z_PART
 	}
 
@@ -209,7 +292,7 @@ func getFileType(path string) int {
 		strings.HasSuffix(baseName, ".r01") {
 		return TYPE_RAR_PART
 	}
-	if matched, _ := regexp.MatchString(`\.tar\.\d{3}$`, baseName); matched {
+	if reTarPart.MatchString(baseName) {
 		return TYPE_TAR_PART
 	}
 
@@ -333,7 +416,7 @@ func testPassword(archivePath, password string) bool {
 	// 构建测试命令，使用7z的t命令测试文件完整性，来判断密码是否正确
 	args := []string{
 		"t",
-		"-p" + password,
+		format7zPasswordArg(password),
 		archivePath,
 	}
 
@@ -376,8 +459,10 @@ func testPassword(archivePath, password string) bool {
 		// 2秒内没有错误标记，说明是正确密码
 		// 确保检查大文件时，7z.exe会一直检查整个文件直至检查结束。
 		//当大于2秒时，基本可以认为密码正确
-		cmd.Process.Kill() // 强制终止命令
-		return true        // 返回true
+		if cmd.Process != nil {
+			cmd.Process.Kill() // 强制终止命令
+		}
+		return true // 返回true
 	}
 }
 
@@ -472,17 +557,17 @@ func handleExtract(archivePath string, extractPath string, password string, isFo
 // archivePath: 压缩文件路径
 // 返回：第一个分卷的路径，错误信息
 func getFirstVolumePath(archivePath string) (string, error) {
-	baseName := filepath.Base(archivePath)
+	baseName := strings.ToLower(filepath.Base(archivePath))
 	baseDir := filepath.Dir(archivePath)
 
 	// 7Z 分卷 (.7z.001, .7z.002, ...)
-	if matched, _ := regexp.MatchString(`\.7z\.\d{3}$`, baseName); matched {
+	if re7zPart3.MatchString(baseName) {
 		baseFile := baseName[:len(baseName)-7] // 移除 .7z.NNN
 		return filepath.Join(baseDir, baseFile+".7z.001"), nil
 	}
 
 	// ZIP 分卷格式1 (.zip.001, .zip.002, ...)
-	if matched, _ := regexp.MatchString(`\.zip\.\d{3}$`, baseName); matched {
+	if reZipPart3.MatchString(baseName) {
 		baseFile := baseName[:len(baseName)-8] // 移除 .zip.NNN
 		firstPart := filepath.Join(baseDir, baseFile+".zip.001")
 		if _, err := os.Stat(firstPart); err == nil {
@@ -491,7 +576,7 @@ func getFirstVolumePath(archivePath string) (string, error) {
 	}
 
 	// ZIP 分卷格式2 (.zip, .z01, .z02, ...)
-	if matched, _ := regexp.MatchString(`\.z\d{2}$`, baseName); matched {
+	if reZ01.MatchString(baseName) {
 		baseFile := baseName[:len(baseName)-4] // 移除 .zNN
 		firstPart := filepath.Join(baseDir, baseFile+".zip")
 		if _, err := os.Stat(firstPart); err == nil {
@@ -500,13 +585,13 @@ func getFirstVolumePath(archivePath string) (string, error) {
 	}
 
 	// RAR 分卷 (.part1.rar, .part2.rar, ...)
-	if matched, _ := regexp.MatchString(`\.part\d+\.rar$`, baseName); matched {
+	if rePartRar.MatchString(baseName) {
 		baseFile := strings.Split(baseName, ".part")[0]
 		return filepath.Join(baseDir, baseFile+".part1.rar"), nil
 	}
 
 	// RAR 旧格式分卷 (.r01, .r02, ...)
-	if matched, _ := regexp.MatchString(`\.r\d{2}$`, baseName); matched {
+	if reR01.MatchString(baseName) {
 		baseFile := baseName[:len(baseName)-4] // 移除 .rNN
 		return filepath.Join(baseDir, baseFile+".rar"), nil
 	}
@@ -545,7 +630,7 @@ func extractArchive(archivePath string, password string, extractPath string) err
 	args := []string{
 		"x",
 		"-y",
-		fmt.Sprintf("-p%s", password),
+		format7zPasswordArg(password),
 		fmt.Sprintf("-o%s", extractPath),
 		archivePath,
 	}
@@ -628,14 +713,6 @@ func findCompressFiles(dir string) []string {
 		".lzh", ".lha",
 	}
 
-	// 检查分卷格式的正则表达式
-	partPatterns := []string{
-		`\.zip\.\d+$`, `\.z\d{2}$`,
-		`\.part\d+\.rar$`, `\.r\d{2}$`,
-		`\.7z\.\d+$`,
-		`\.tar\.\d{3}$`, // 添加对 .tar.001 等分卷的支持
-	}
-
 	// 分别存储压缩文件和目录
 	var compressFiles []string
 	var directories []string
@@ -669,9 +746,8 @@ func findCompressFiles(dir string) []string {
 
 		// 如果不是常规压缩文件，检查分卷格式
 		if !isCompressFile {
-			for _, pattern := range partPatterns {
-				matched, _ := regexp.MatchString(pattern, lowerName)
-				if matched {
+			for _, re := range rePartPatterns {
+				if re.MatchString(lowerName) {
 					compressFiles = append(compressFiles, decodedName)
 					break
 				}
@@ -952,6 +1028,23 @@ func getDefaultExtractPath(archivePath string) string {
 	return filepath.Join(filepath.Dir(archivePath), nameWithoutExt)
 }
 
+// 函数说明：读取一行输入（支持路径中含空格，如拖入文件时的路径）
+// 参数：
+// reader: 输入读取器
+// 返回：去除首尾空白和引号后的输入内容
+func readLineInput(reader *bufio.Reader) string {
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(line)
+	// 移除 Windows 拖入路径时可能添加的引号
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	return s
+}
+
 // 函数说明：格式化路径显示
 // 参数：
 // path: 路径
@@ -984,9 +1077,18 @@ func savePasswordToFile(password string) error {
 		return fmt.Errorf("读取密码文件失败: %v", err)
 	}
 
-	// 检查密码是否已存在
-	if strings.Contains(string(content), password) {
-		return nil
+	// 如果文件存在，检查密码是否已在文件中（按行精确匹配）
+	if err == nil {
+		// 将内容分割成行
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			// 去除每行前后的空白字符
+			trimmedLine := strings.TrimSpace(line)
+			// 精确匹配整行
+			if trimmedLine == password {
+				return nil
+			}
+		}
 	}
 
 	// 以追加模式打开文件
@@ -1015,7 +1117,8 @@ func savePasswordToFile(password string) error {
 // 参数：
 // archivePath: 压缩文件路径
 // extractPath: 解压路径
-func handleCrackFailed(archivePath string, extractPath string) {
+// reader: 输入读取器（用于读取含空格的密码）
+func handleCrackFailed(archivePath string, extractPath string, reader *bufio.Reader) {
 	fmt.Println("\n密码破解失败！")
 
 	for {
@@ -1034,8 +1137,8 @@ func handleCrackFailed(archivePath string, extractPath string) {
 				fmt.Println(password) // 显示粘贴的内容
 			}
 		} else {
-			// 普通输入
-			fmt.Scanln(&password)
+			// 普通输入（使用 readLineInput 支持密码中含空格）
+			password = readLineInput(reader)
 		}
 
 		if password == "" {
@@ -1063,7 +1166,8 @@ func handleCrackFailed(archivePath string, extractPath string) {
 // archivePath: 压缩文件路径
 // passwords: 密码列表
 // passwordsInfo: 使用的密码文件信息
-func processArchive(archivePath string, passwords []string, passwordsInfo string) {
+// reader: 输入读取器（用于密码输入等，可为 nil）
+func processArchive(archivePath string, passwords []string, passwordsInfo string, reader *bufio.Reader) {
 	// 获取文件信息
 	fileInfo, err := os.Stat(archivePath)
 	if err != nil {
@@ -1115,7 +1219,11 @@ func processArchive(archivePath string, passwords []string, passwordsInfo string
 	if foundPassword, err := crackArchive(archivePath, passwords); err == nil {
 		handleExtract(archivePath, extractPath, foundPassword, true)
 	} else {
-		handleCrackFailed(archivePath, extractPath)
+		if reader != nil {
+			handleCrackFailed(archivePath, extractPath, reader)
+		} else {
+			handleCrackFailed(archivePath, extractPath, bufio.NewReader(os.Stdin))
+		}
 	}
 }
 
@@ -1497,7 +1605,12 @@ func main() {
 			return
 		default:
 			// 如果参数是文件路径，直接处理该文件
-			filePath := os.Args[1]
+			// 路径含空格时可能被拆成多个参数，需合并
+			filePath := strings.Join(os.Args[1:], " ")
+			if _, err := os.Stat(filePath); err != nil {
+				// 若合并后仍失败，尝试只用第一个参数（兼容正确传参的情况）
+				filePath = os.Args[1]
+			}
 			if _, err := os.Stat(filePath); err == nil {
 				// 获取文件的绝对路径
 				absPath, err := filepath.Abs(filePath)
@@ -1517,7 +1630,7 @@ func main() {
 
 				// 处理文件
 				if getFileType(absPath) != -1 {
-					processArchive(absPath, passwords, passwordsInfo)
+					processArchive(absPath, passwords, passwordsInfo, nil)
 					// 处理更新和退出
 					handleUpdateAndExit()
 				} else {
@@ -1532,6 +1645,7 @@ func main() {
 	}
 
 	// 交互模式
+	reader := bufio.NewReader(os.Stdin)
 	currentDir := "."
 	for {
 		var archivePath string
@@ -1571,8 +1685,8 @@ func main() {
 					fmt.Println(choice) // 显示粘贴的内容
 				}
 			} else {
-				// 普通输入
-				fmt.Scanln(&choice)
+				// 普通输入（使用 readLineInput 支持路径中含空格，如拖入文件）
+				choice = readLineInput(reader)
 			}
 
 			if choice == "0" || choice == "q" || choice == "Q" {
@@ -1619,7 +1733,7 @@ func main() {
 				// 处理每个压缩文件
 				for i, file := range compressFiles {
 					fmt.Printf("\n[%d/%d] 处理文件: %s\n", i+1, len(compressFiles), filepath.Base(file))
-					processArchive(file, passwords, passwordsInfo)
+					processArchive(file, passwords, passwordsInfo, reader)
 				}
 				// 处理更新和退出
 				handleUpdateAndExit()
@@ -1704,7 +1818,7 @@ func main() {
 			fmt.Println("输入u: 卸载右键菜单")
 			fmt.Print("\n请输入选择项或输入路径(右键直接粘贴): ")
 			var choice string
-			fmt.Scanln(&choice)
+			choice = readLineInput(reader)
 
 			if choice == "0" {
 				fmt.Println("程序已退出")
@@ -1735,7 +1849,7 @@ func main() {
 		// 检查密码文件
 		if _, err := os.Stat(dictPath); os.IsNotExist(err) {
 			fmt.Printf("未找到默认密码文件 %s，请输入密码文件路径 (直接回车退出): ", dictPath)
-			fmt.Scanln(&dictPath)
+			dictPath = readLineInput(reader)
 			if dictPath == "" {
 				fmt.Println("程序已退出")
 				return
@@ -1780,7 +1894,7 @@ func main() {
 		fmt.Printf("共 %d 个密码\n\n", len(passwords))
 		fmt.Println("开始尝试破解...")
 
-		processArchive(archivePath, passwords, passwordsInfo)
+		processArchive(archivePath, passwords, passwordsInfo, reader)
 		// 处理更新和退出
 		handleUpdateAndExit()
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -337,24 +338,37 @@ func calculateMD5(filePath string) (string, error) {
 func (um *UpdateManager) compareVersions(newVersion string) int {
 	// 移除版本号前缀的'v'
 	current := strings.TrimPrefix(um.CurrentVersion, "v")
-
 	new := strings.TrimPrefix(newVersion, "v")
 
 	// 分割版本号
 	currentParts := strings.Split(current, ".")
 	newParts := strings.Split(new, ".")
 
-	// 比较每个部分
+	// 按数字比较每个部分（如 "2" < "10"）
 	for i := 0; i < len(currentParts) && i < len(newParts); i++ {
-		if currentParts[i] < newParts[i] {
-			return 1 // 有新版本
-		}
-		if currentParts[i] > newParts[i] {
-			return -1 // 当前版本更新
+		curN, curOk := parseVersionPart(currentParts[i])
+		newN, newOk := parseVersionPart(newParts[i])
+
+		if curOk && newOk {
+			// 均为数字，按数值比较
+			if curN < newN {
+				return 1
+			}
+			if curN > newN {
+				return -1
+			}
+		} else {
+			// 含非数字，回退到字符串比较
+			if currentParts[i] < newParts[i] {
+				return 1
+			}
+			if currentParts[i] > newParts[i] {
+				return -1
+			}
 		}
 	}
 
-	// 如果前面都相同，比较版本号长度
+	// 前面都相同，比较版本号长度
 	if len(newParts) > len(currentParts) {
 		return 1
 	}
@@ -363,4 +377,13 @@ func (um *UpdateManager) compareVersions(newVersion string) int {
 	}
 
 	return 0 // 版本相同
+}
+
+// parseVersionPart 解析版本段为数字，支持 "1"、"10"、"0" 等
+func parseVersionPart(s string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }

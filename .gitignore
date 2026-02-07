@@ -24,6 +24,7 @@ passwd*
 *.swp
 *.swo
 func.md
+OPTIMIZATION.md
 
 # 依赖目录
 /vendor/
@@ -38,7 +39,9 @@ Desktop.ini
 # macOS
 .DS_Store
 
-# 资源文件
+# 资源文件 - 嵌入的 7z 需提交，排除通用规则
+!resources/7z.exe
+!resources/7z.dll
 
 
 # 配置文件

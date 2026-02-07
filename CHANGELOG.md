@@ -5,6 +5,24 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.6.0] - 2026-02-08
+
+### 修复
+- 修复拖入或输入带空格的路径时路径被截断的问题（如 `C:\path\my file.zip` 被截成 `C:\path\my`）
+- 修复命令行模式下路径含空格可能被拆成多个参数导致无法识别的问题
+
+### 优化
+- 优化 使用Zip-zstd替换7z的底层dll和zip,以支持更多的压缩算法。 [@Zip-zstd](https://github.com/mcmilk/7-Zip-zstd)
+- 优化 7z.exe/7z.dll 的释放策略：按版本号创建子目录（如 `7zrpw_v0.1.6.0`），确保程序更新后自动使用新版本 7z 组件
+
+此版本感谢[@yydy777](https://github.com/yydy777 )的贡献
+
+
+## [v0.1.5.5] - 2025-04-28
+
+### 优化
+- 优化了新密码加入密码本的逻辑
+
 ## [v0.1.5.4] - 2025-02-20
 
 ### 新增
