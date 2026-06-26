@@ -2,19 +2,23 @@ package main
 
 import (
 	"bufio"
-	"crypto/md5"
+	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"golang.org/x/sys/windows"
+	"github.com/minio/selfupdate"
 )
 
 // 版本信息结构
@@ -24,7 +28,31 @@ type VersionInfo struct {
 	ReleaseNote string `json:"release_note"`
 	MD5         string `json:"md5"`
 	ForceUpdate bool   `json:"force_update"` // 确保字段名完全匹配
+	SHA256      string `json:"sha256"`       // 新机制：校验和（验签用），老客户端忽略此字段
+	Signature   string `json:"signature"`    // 新机制：Ed25519 签名(base64)，老客户端忽略此字段
 }
+
+//go:embed update_pub.key
+var updatePubKeyB64 string
+
+// updatePublicKey 内置的更新签名公钥（Ed25519），用于验证下载的新版本是否由官方私钥签名。
+// 公钥可公开；私钥离线保管（见 tools/sign 与方案文档）。缺失公钥文件会导致编译失败（有意为之）。
+var updatePublicKey ed25519.PublicKey
+
+func init() {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(updatePubKeyB64))
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		panic("内置更新公钥无效（client/update_pub.key）")
+	}
+	updatePublicKey = ed25519.PublicKey(b)
+}
+
+const (
+	// maxUpdateSize 更新包读取上限，防止恶意服务器用超大/无限响应撑爆内存（读取发生在验签之前）
+	maxUpdateSize = 100 * 1024 * 1024 // 100MB
+	// maxVersionRespSize 版本接口响应读取上限（正常只是很小的 JSON）
+	maxVersionRespSize = 1 * 1024 * 1024 // 1MB
+)
 
 // UpdateManager 更新管理器
 type UpdateManager struct {
@@ -125,8 +153,9 @@ var (
 func (m *UpdateManager) CheckUpdate(force bool) error {
 	fmt.Printf("当前版本: %s\n", m.CurrentVersion)
 
-	// 从服务器获取版本信息
-	resp, err := http.Get("https://down.pp.ci/api/v1/version")
+	// 从服务器获取版本信息（带超时，避免网络异常时长时间阻塞）
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Get("https://down.pp.ci/api/v1/version")
 	if err != nil {
 		return fmt.Errorf("无法连接到更新服务器，请稍后重试")
 	}
@@ -137,8 +166,8 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 		return fmt.Errorf("更新服务器暂时不可用 (HTTP %d)", resp.StatusCode)
 	}
 
-	// 读取和解析版本信息
-	body, err := io.ReadAll(resp.Body)
+	// 读取和解析版本信息（限制大小，防止异常超大响应）
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxVersionRespSize))
 	if err != nil {
 		return fmt.Errorf("读取服务器响应失败")
 	}
@@ -189,17 +218,6 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 
 		// 将消息发送到通道
 		updateResultChan <- updateMsg.String()
-
-		// select {
-		// case updateResultChan <- updateMsg.String():
-		// 	if debugMode {
-		// 		fmt.Println("更新消息已发送到通道")
-		// 	}
-		// default:
-		// 	if debugMode {
-		// 		fmt.Println("通道已满，无法发送更新消息")
-		// 	}
-		// }
 	}
 
 	// 执行更新
@@ -211,208 +229,89 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 	return nil
 }
 
-// doUpdate 执行更新
+// doUpdate 下载、校验、验签并原地替换为新版本
+// 取代旧的 update.bat 自替换方案：新增 sha256 完整性校验 + Ed25519 签名验签，
+// 由 minio/selfupdate 负责原地替换正在运行的 exe（Windows 改名）与失败回滚。
 func (m *UpdateManager) doUpdate(info VersionInfo) error {
 	fmt.Println("\n=== 开始更新过程 ===")
 
-	// 获取当前程序路径
-	exePath, err := os.Executable()
+	// 合规要点（fail-closed）：新客户端只接受带 sha256 + 签名的更新，
+	// 缺任一项即拒绝，防止「降级/签名剥离」攻击（绝不回退到无签名的旧路径）
+	if info.SHA256 == "" || info.Signature == "" {
+		return fmt.Errorf("服务端未提供校验和或签名，出于安全已拒绝更新")
+	}
+	wantSum, err := hex.DecodeString(strings.TrimSpace(info.SHA256))
+	if err != nil || len(wantSum) != sha256.Size {
+		return fmt.Errorf("服务端 sha256 字段无效")
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(info.Signature))
 	if err != nil {
-		return fmt.Errorf("获取程序路径失败: %v", err)
+		return fmt.Errorf("服务端 signature 字段无效")
 	}
 
-	// 下载新版本
+	// 下载新版本（带总超时）
 	fmt.Printf("正在下载新版本: %s\n", info.DownloadURL)
-	resp, err := http.Get(info.DownloadURL)
+	httpClient := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := httpClient.Get(info.DownloadURL)
 	if err != nil {
 		return fmt.Errorf("下载失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	// 创建临时文件
-	tempFile := filepath.Join(filepath.Dir(exePath), "update.tmp")
-	out, err := os.Create(tempFile)
-	if err != nil {
-		return fmt.Errorf("创建临时文件失败: %v", err)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载失败 (HTTP %d)", resp.StatusCode)
 	}
+	// 限制读取上限：多读 1 字节用于判断是否超限，避免恶意超大响应撑爆内存
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxUpdateSize+1))
+	if err != nil {
+		return fmt.Errorf("读取下载内容失败: %v", err)
+	}
+	if int64(len(data)) > maxUpdateSize {
+		return fmt.Errorf("更新包超过大小上限(%d MB)，已拒绝", maxUpdateSize/1024/1024)
+	}
+	fmt.Printf("下载完成，大小 %.2f MB\n", float64(len(data))/1024/1024)
 
-	// 获取文件大小
-	fileSize := resp.ContentLength
-	fmt.Printf("文件大小: %.2f MB\n", float64(fileSize)/1024/1024)
+	// 校验和（完整性）
+	sum := sha256.Sum256(data)
+	if !bytes.Equal(sum[:], wantSum) {
+		return fmt.Errorf("校验和不匹配，文件可能损坏或被篡改，已拒绝更新")
+	}
+	// 验签（真伪）：用内置公钥验证「对 sha256 摘要的 Ed25519 签名」
+	if !ed25519.Verify(updatePublicKey, sum[:], sig) {
+		return fmt.Errorf("签名验证失败，更新包不可信，已拒绝更新")
+	}
+	fmt.Println("校验和与签名验证通过")
+	fmt.Printf("即将从 %s 更新到 %s ...\n", m.CurrentVersion, info.Version)
 
-	// 下载文件并显示进度
-	done := make(chan bool)
-	go func() {
-		var downloaded int64
-		buffer := make([]byte, 32*1024)
-		for {
-			n, err := resp.Body.Read(buffer)
-			if n > 0 {
-				_, writeErr := out.Write(buffer[:n])
-				if writeErr != nil {
-					fmt.Printf("\n写入失败: %v\n", writeErr)
-					break
-				}
-				downloaded += int64(n)
-				if fileSize > 0 {
-					progress := float64(downloaded) / float64(fileSize) * 100
-					fmt.Printf("\r下载进度: %.1f%% (%.2f/%.2f MB)",
-						progress,
-						float64(downloaded)/1024/1024,
-						float64(fileSize)/1024/1024)
-				}
-			}
-			if err != nil {
-				break
-			}
+	// 原地替换正在运行的 exe：selfupdate 负责 Windows 下的替换与失败自动回滚
+	if err := selfupdate.Apply(bytes.NewReader(data), selfupdate.Options{Checksum: sum[:]}); err != nil {
+		// 兜底：替换中途失败时尝试回滚到旧版本
+		if rerr := selfupdate.RollbackError(err); rerr != nil {
+			return fmt.Errorf("更新失败且回滚失败（程序可能已损坏，请手动重装）: %v / 回滚错误: %v", err, rerr)
 		}
-		done <- true
-	}()
-
-	<-done
-	fmt.Println("\n下载完成")
-
-	// 关闭输出文件
-	out.Close()
-
-	// 验证MD5
-	if info.MD5 != "" {
-		fmt.Println("正在验证文件完整性...")
-		md5sum, err := calculateMD5(tempFile)
-		if err != nil {
-			os.Remove(tempFile)
-			return fmt.Errorf("验证文件失败: %v", err)
-		}
-		if md5sum != info.MD5 {
-			os.Remove(tempFile)
-			return fmt.Errorf("文件校验失败，可能已损坏")
-		}
-		fmt.Println("文件验证通过")
+		return fmt.Errorf("更新失败，已回滚到旧版本: %v", err)
 	}
 
-	// 在创建批处理文件前输出最后的确认信息
-	fmt.Printf("\n=== 更新确认 ===\n")
-	fmt.Printf("更新文件已下载和验证\n")
-	fmt.Printf("即将从版本 %s 更新到 %s\n", m.CurrentVersion, info.Version)
-
-	// 显示3秒倒计时
-	fmt.Println("\n程序将在3秒后开始更新...")
-	for i := 3; i > 0; i-- {
-		fmt.Printf("\r倒计时: %d 秒", i)
-		time.Sleep(time.Second)
-	}
-	fmt.Println("\n开始更新...")
-
-	// 创建批处理文件
-	batContent := fmt.Sprintf(`@echo off
-chcp 936 >nul
-title Update
-echo Waiting for program to exit...
-timeout /t 1 /nobreak > nul
-
-:kill_loop
-taskkill /f /im "%s" >nul 2>&1
-timeout /t 1 /nobreak > nul
-tasklist | find /i "%s" >nul
-if not errorlevel 1 goto kill_loop
-
-echo Creating backup...
-copy /y "%s" "%s.bak" >nul
-if errorlevel 1 (
-    echo Backup failed!
-    exit /b 1
-)
-
-echo Updating program...
-copy /y "%s" "%s" >nul
-if errorlevel 1 (
-    echo Update failed! Restoring...
-    copy /y "%s.bak" "%s" >nul
-    del "%s"
-    echo Previous version restored
-    exit /b 1
-)
-
-echo Cleaning up...
-if exist "%s.bak" del "%s.bak" >nul
-if exist "%s" del "%s" >nul
-
-echo Update completed!
-start "" "%s"
-
-:: del bat
-(goto) 2>nul & del "%%~f0"
-exit
-`, filepath.Base(exePath), filepath.Base(exePath),
-		exePath, exePath,
-		tempFile, exePath,
-		exePath, exePath, tempFile,
-		exePath, exePath,
-		tempFile, tempFile,
-		exePath)
-
-	// 创建更新脚本
-	batPath := filepath.Join(filepath.Dir(exePath), "update.bat")
-	if err := os.WriteFile(batPath, []byte(batContent), 0644); err != nil {
-		return fmt.Errorf("创建更新脚本失败: %v", err)
-	}
-
-	// 使用新的 API 启动更新进程
-	batPathPtr, err := windows.UTF16PtrFromString(batPath)
-	if err != nil {
-		return fmt.Errorf("转换路径失败: %v", err)
-	}
-
-	dirPtr, err := windows.UTF16PtrFromString(filepath.Dir(batPath))
-	if err != nil {
-		return fmt.Errorf("转换目录失败: %v", err)
-	}
-
-	var startupInfo windows.StartupInfo
-	var processInfo windows.ProcessInformation
-
-	err = windows.CreateProcess(
-		nil,          // 应用程序名称
-		batPathPtr,   // 命令行
-		nil,          // 进程安全属性
-		nil,          // 线程安全属性
-		false,        // 是否继承句柄
-		0,            // 创建标志（移除 CREATE_NO_WINDOW）
-		nil,          // 环境变量
-		dirPtr,       // 当前目录
-		&startupInfo, // 启动信息
-		&processInfo, // 进程信息
-	)
-
-	if err != nil {
-		return fmt.Errorf("启动更新进程失败: %v", err)
-	}
-
-	// 关闭进程和线程句柄
-	windows.CloseHandle(processInfo.Thread)
-	windows.CloseHandle(processInfo.Process)
-
-	// 直接退出程序前的最后提示
-	fmt.Println("\n=== 更新中，请稍等 ===")
-
-	os.Exit(0)
-	return nil
+	fmt.Println("\n✓ 更新成功！正在重启新版本...")
+	return restartSelf()
 }
 
-// 添加 calculateMD5 函数
-func calculateMD5(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+// restartSelf 启动替换后的新 exe 并退出当前进程（更新后自动重启）
+func restartSelf() error {
+	exe, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("打开文件失败: %v", err)
+		fmt.Println("更新已完成，但获取程序路径失败，请手动重新打开程序。")
+		os.Exit(0)
 	}
-	defer file.Close()
-
-	hash := md5.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", fmt.Errorf("计算MD5失败: %v", err)
+	cmd := exec.Command(exe)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		// 边界：自动重启失败不影响「已更新成功」这个事实，提示用户手动打开
+		fmt.Printf("更新已完成，但自动重启失败，请手动重新打开程序。(%v)\n", err)
 	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	os.Exit(0)
+	return nil
 }
 
 // 版本比较函数
