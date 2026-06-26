@@ -10,8 +10,11 @@ import (
 // 添加调试开关
 var debugMode bool = false
 
-// 程序版本号（同时决定 7z 释放目录、旧目录清理逻辑，见 sevenzip.go）
-const VERSION = "v0.1.6.0"
+// VERSION 程序版本号。由 build.bat 通过 -ldflags "-X main.VERSION=%VER%" 在构建时注入，
+// 发版只改 build.bat 的 VER 一处；直接 go build 未注入时为 "dev"（非正式构建标记）。
+// 它同时决定界面显示、7z 释放目录(7zrpw_<VERSION>)、自动更新的版本比对，故须保持 vX.Y.Z 格式。
+// 注意：-X 只能注入 var 不能注入 const，所以这里必须是 var。
+var VERSION = "dev"
 
 // 主函数
 func main() {
