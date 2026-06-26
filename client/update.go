@@ -47,6 +47,13 @@ func init() {
 	updatePublicKey = ed25519.PublicKey(b)
 }
 
+const (
+	// maxUpdateSize 更新包读取上限，防止恶意服务器用超大/无限响应撑爆内存（读取发生在验签之前）
+	maxUpdateSize = 100 * 1024 * 1024 // 100MB
+	// maxVersionRespSize 版本接口响应读取上限（正常只是很小的 JSON）
+	maxVersionRespSize = 1 * 1024 * 1024 // 1MB
+)
+
 // UpdateManager 更新管理器
 type UpdateManager struct {
 	CurrentVersion string
@@ -159,8 +166,8 @@ func (m *UpdateManager) CheckUpdate(force bool) error {
 		return fmt.Errorf("更新服务器暂时不可用 (HTTP %d)", resp.StatusCode)
 	}
 
-	// 读取和解析版本信息
-	body, err := io.ReadAll(resp.Body)
+	// 读取和解析版本信息（限制大小，防止异常超大响应）
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxVersionRespSize))
 	if err != nil {
 		return fmt.Errorf("读取服务器响应失败")
 	}
@@ -253,9 +260,13 @@ func (m *UpdateManager) doUpdate(info VersionInfo) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("下载失败 (HTTP %d)", resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	// 限制读取上限：多读 1 字节用于判断是否超限，避免恶意超大响应撑爆内存
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxUpdateSize+1))
 	if err != nil {
 		return fmt.Errorf("读取下载内容失败: %v", err)
+	}
+	if int64(len(data)) > maxUpdateSize {
+		return fmt.Errorf("更新包超过大小上限(%d MB)，已拒绝", maxUpdateSize/1024/1024)
 	}
 	fmt.Printf("下载完成，大小 %.2f MB\n", float64(len(data))/1024/1024)
 
