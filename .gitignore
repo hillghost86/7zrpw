@@ -55,3 +55,10 @@ server/config.json
 /server/
 /build.bat
 /index.html
+
+# 规划文档（本地，不入仓）
+/docs/
+
+# 更新签名私钥（绝不入仓！公钥 client/update_pub.key 仍入仓）
+/keys/
+*_priv.key
