@@ -14,9 +14,9 @@
 # 备份文件
 *.bak
 
-# 密码文件
+# 密码字典（运行时文件，不入仓）
+# 注意：只匹配 *.txt 字典，不要用裸 passwd* 否则会误伤源码 client/passwd.go
 passwd*.txt*
-passwd*
 
 # IDE 相关
 .idea/
@@ -39,9 +39,9 @@ Desktop.ini
 # macOS
 .DS_Store
 
-# 资源文件 - 嵌入的 7z 需提交，排除通用规则
-!resources/7z.exe
-!resources/7z.dll
+# 资源文件 - 嵌入的 7z 需提交，排除通用规则（主程序已移至 client\）
+!client/resources/7z.exe
+!client/resources/7z.dll
 
 
 # 配置文件

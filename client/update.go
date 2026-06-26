@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -16,9 +17,93 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// 版本信息结构
+type VersionInfo struct {
+	Version     string `json:"version"`
+	DownloadURL string `json:"download_url"`
+	ReleaseNote string `json:"release_note"`
+	MD5         string `json:"md5"`
+	ForceUpdate bool   `json:"force_update"` // 确保字段名完全匹配
+}
+
 // UpdateManager 更新管理器
 type UpdateManager struct {
 	CurrentVersion string
+}
+
+// 函数说明：异步检查更新
+func asyncCheckUpdate() {
+	go func() {
+		updateManager, err := NewUpdateManager(VERSION)
+		if err != nil {
+			if debugMode {
+				fmt.Printf("初始化更新管理器失败: %v\n", err)
+			}
+			return
+		}
+
+		if err := updateManager.CheckUpdate(false); err != nil {
+			if debugMode {
+				fmt.Printf("检查更新失败: %v\n", err)
+			}
+		}
+		// 移除默认消息，使用 CheckUpdate 中的详细更新信息
+	}()
+}
+
+// handleUpdateAndExit 处理更新检查和程序退出
+func handleUpdateAndExit() {
+	reader := bufio.NewReader(os.Stdin)
+
+	// 检查是否有更新消息
+	select {
+	case updateMsg := <-updateResultChan:
+		// 如果不是新版本消息，直接返回
+		if !strings.Contains(updateMsg, "发现新版本") {
+			return
+		}
+
+		// 显示更新信息并询问是否更新
+		fmt.Println(updateMsg)
+		fmt.Print("\n回车键立即更新? (y/n) [Y]: ")
+
+		answer, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Printf("读取用户输入失败: %v\n", err)
+			return
+		}
+
+		// 如果用户选择不更新，直接返回
+		answer = strings.TrimSpace(strings.ToLower(answer))
+		if answer != "" && answer != "y" && answer != "yes" {
+			return
+		}
+
+		// 检查更新管理器
+		if updateManager == nil {
+			fmt.Println("更新管理器未初始化")
+			fmt.Print("\n按回车键退出...")
+			reader.ReadString('\n')
+			return
+		}
+
+		// 执行更新
+		if debugMode {
+			fmt.Printf("开始执行更新，版本信息: %+v\n", updateInfo)
+		}
+
+		if err := updateManager.doUpdate(updateInfo); err != nil {
+			fmt.Printf("更新失败: %v\n", err)
+			fmt.Print("\n按回车键退出...")
+			reader.ReadString('\n')
+		}
+		// 更新成功会自动退出
+		return
+
+	default:
+		fmt.Print("\n按回车键退出...")
+		reader.ReadString('\n')
+	}
 }
 
 // NewUpdateManager 创建更新管理器
