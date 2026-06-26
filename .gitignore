@@ -25,6 +25,8 @@ passwd*.txt*
 *.swo
 func.md
 OPTIMIZATION.md
+# AI 助手指引，仅本地保留，不入仓
+/CLAUDE.md
 
 # 依赖目录
 /vendor/
